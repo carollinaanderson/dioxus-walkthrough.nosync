@@ -16,6 +16,10 @@ duroxide-pg = { version = "0.1", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 dotenvy = { version = "0.15", optional = true }
 
+# Client-only: interval sleep for the status-polling loop.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
+
 [features]
 default = ["web"]
 web = ["dioxus/web"]
