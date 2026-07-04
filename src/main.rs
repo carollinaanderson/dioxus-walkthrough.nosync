@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 use dioxus::prelude::*;
 
+mod server;
+
 #[cfg(feature = "server")]
 mod workflow;
 
