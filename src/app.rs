@@ -35,7 +35,12 @@ pub fn App() -> Element {
 
     let create = move |_| async move {
         let amt = amount().trim().parse::<u32>().unwrap_or(0);
-        match start_order(OrderInput { item: item(), amount: amt }).await {
+        match start_order(OrderInput {
+            item: item(),
+            amount: amt,
+        })
+        .await
+        {
             Ok(_) => error.set(None),
             Err(e) => error.set(Some(e.to_string())),
         }

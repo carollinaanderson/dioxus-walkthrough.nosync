@@ -4,21 +4,20 @@
 
 use std::sync::OnceLock;
 
-use sqlx::{PgPool, Row};
+use sqlx::{migrate::MigrateError, prelude::FromRow, PgPool};
 
 static POOL: OnceLock<PgPool> = OnceLock::new();
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct OrderRow {
     pub instance_id: String,
     pub item: String,
-    pub amount: u32,
+    pub amount: i64,
 }
 
 /// Store the (shared) pool and apply pending sqlx migrations.
-pub async fn init(pool: PgPool) -> Result<(), String> {
-    MIGRATOR.run(&pool).await.map_err(|e| e.to_string())?;
+pub async fn init(pool: PgPool) -> Result<(), MigrateError> {
+    sqlx::migrate!("./migrations").run(&pool).await?;
     let _ = POOL.set(pool);
     Ok(())
 }
@@ -38,27 +37,21 @@ pub async fn insert(instance_id: &str, item: &str, amount: u32) -> Result<(), sq
     Ok(())
 }
 
-fn row_from(r: &sqlx::postgres::PgRow) -> OrderRow {
-    OrderRow {
-        instance_id: r.get("instance_id"),
-        item: r.get("item"),
-        amount: r.get::<i64, _>("amount") as u32,
-    }
-}
-
 pub async fn list() -> Result<Vec<OrderRow>, sqlx::Error> {
-    let rows = sqlx::query("SELECT instance_id, item, amount FROM orders ORDER BY created_at DESC")
-        .fetch_all(&pool())
-        .await?;
-    Ok(rows.iter().map(row_from).collect())
+    sqlx::query_as::<_, OrderRow>(
+        "SELECT instance_id, item, amount FROM orders ORDER BY created_at DESC",
+    )
+    .fetch_all(&pool())
+    .await
 }
 
-pub async fn get(instance_id: &str) -> Result<Option<OrderRow>, sqlx::Error> {
-    let row = sqlx::query("SELECT instance_id, item, amount FROM orders WHERE instance_id = $1")
-        .bind(instance_id)
-        .fetch_optional(&pool())
-        .await?;
-    Ok(row.as_ref().map(row_from))
+pub async fn get(instance_id: &str) -> Result<OrderRow, sqlx::Error> {
+    sqlx::query_as::<_, OrderRow>(
+        "SELECT instance_id, item, amount FROM orders WHERE instance_id = $1",
+    )
+    .bind(instance_id)
+    .fetch_one(&pool())
+    .await
 }
 
 // The orders store is exercised end-to-end (insert/get/list) against real

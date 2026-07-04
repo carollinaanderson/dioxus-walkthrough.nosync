@@ -30,18 +30,10 @@ pub fn client() -> Arc<Client> {
 // ---- Activities: stubs (log + echo). Kept trivial so the PoC is about orchestration. ----
 fn registries() -> (ActivityRegistry, OrchestrationRegistry) {
     let activities = ActivityRegistry::builder()
-        .register("ValidateOrder", |_ctx: ActivityContext, input: String| async move {
-            Ok::<String, String>(format!("validated:{input}"))
-        })
-        .register("ChargePayment", |_ctx: ActivityContext, input: String| async move {
-            Ok::<String, String>(format!("charged:{input}"))
-        })
-        .register("FulfillOrder", |_ctx: ActivityContext, input: String| async move {
-            Ok::<String, String>(format!("fulfilled:{input}"))
-        })
-        .register("RefundPayment", |_ctx: ActivityContext, input: String| async move {
-            Ok::<String, String>(format!("refunded:{input}"))
-        })
+        .register("ValidateOrder", validate_order)
+        .register("ChargePayment", charge_payment)
+        .register("FulfillOrder", fulfill_order)
+        .register("RefundPayment", refund_payment)
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
@@ -51,18 +43,36 @@ fn registries() -> (ActivityRegistry, OrchestrationRegistry) {
     (activities, orchestrations)
 }
 
+async fn validate_order(_ctx: ActivityContext, input: String) -> Result<String, String> {
+    Ok(format!("validated:{input}"))
+}
+
+async fn charge_payment(_ctx: ActivityContext, input: String) -> Result<String, String> {
+    Ok(format!("charged:{input}"))
+}
+
+async fn fulfill_order(_ctx: ActivityContext, input: String) -> Result<String, String> {
+    Ok(format!("fulfilled:{input}"))
+}
+
+async fn refund_payment(_ctx: ActivityContext, input: String) -> Result<String, String> {
+    Ok(format!("refunded:{input}"))
+}
+
 // ---- Orchestration: validate -> charge -> await approval (vs auto-expiry timer)
 //      -> fulfill | refund (saga compensation). ----
 async fn order_approval(ctx: OrchestrationContext, input: String) -> Result<String, String> {
-    ctx.schedule_activity("ValidateOrder", input.clone()).await?;
-    ctx.schedule_activity("ChargePayment", input.clone()).await?;
+    ctx.schedule_activity("ValidateOrder", input.clone())
+        .await?;
+    ctx.schedule_activity("ChargePayment", input.clone())
+        .await?;
 
     // Race a human decision against an auto-expiry timer.
     let approval = ctx.schedule_wait(APPROVAL_EVENT);
     let timeout = ctx.schedule_timer(Duration::from_secs(APPROVAL_TIMEOUT_SECS));
 
     let decision = match ctx.select2(approval, timeout).await {
-        Either2::First(payload) => payload,          // "approve" / "reject"
+        Either2::First(payload) => payload, // "approve" / "reject"
         Either2::Second(()) => "reject".to_string(), // timed out -> reject
     };
 
@@ -101,20 +111,12 @@ pub fn stage_from_status(status: &OrchestrationStatus) -> (String, bool) {
     }
 }
 
-/// Bootstrap the Postgres-backed runtime and control-plane client.
-pub async fn init(database_url: &str) -> Result<(), String> {
-    use duroxide_pg::PostgresProvider;
-    let provider = PostgresProvider::new(database_url)
-        .await
-        .map_err(|e| e.to_string())?;
-    // Reuse duroxide-pg's pool for the orders table.
-    crate::orders::init(provider.pool().clone()).await?;
+/// Bootstrap the workflow runtime and control-plane client.
+pub async fn init(provider: impl Provider) {
     let store: Arc<dyn Provider> = Arc::new(provider);
     let (activities, orchestrations) = registries();
-    let rt = Runtime::start_with_store(store.clone(), activities, orchestrations).await;
-    let _ = RUNTIME.set(rt);
+    let _ = RUNTIME.set(Runtime::start_with_store(store.clone(), activities, orchestrations).await);
     let _ = CLIENT.set(Arc::new(Client::new(store)));
-    Ok(())
 }
 
 #[cfg(test)]
@@ -138,16 +140,27 @@ mod tests {
     ) -> (OrchestrationStatus, crate::orders::OrderRow) {
         let instance = format!("wf-{decision}-{}", uuid::Uuid::new_v4());
         let input = serde_json::json!({ "item": item, "amount": amount }).to_string();
-        client.start_orchestration(&instance, ORCHESTRATION_NAME, input).await.unwrap();
-        crate::orders::insert(&instance, item, amount).await.unwrap();
+        client
+            .start_orchestration(&instance, ORCHESTRATION_NAME, input)
+            .await
+            .unwrap();
+        crate::orders::insert(&instance, item, amount)
+            .await
+            .unwrap();
 
         tokio::time::sleep(Duration::from_millis(700)).await;
-        client.raise_event(&instance, APPROVAL_EVENT, decision).await.unwrap();
+        client
+            .raise_event(&instance, APPROVAL_EVENT, decision)
+            .await
+            .unwrap();
         let status = client
             .wait_for_orchestration(&instance, Duration::from_secs(15))
             .await
             .unwrap();
-        let row = crate::orders::get(&instance).await.unwrap().expect("order row present");
+        let row = crate::orders::get(&instance)
+            .await
+            .unwrap()
+            .expect("order row present");
         (status, row)
     }
 
@@ -166,10 +179,17 @@ mod tests {
         // 1) orders store CRUD sanity (same shared pool).
         let probe = format!("probe-{}", uuid::Uuid::new_v4());
         crate::orders::insert(&probe, "Probe", 7).await.unwrap();
-        let got = crate::orders::get(&probe).await.unwrap().expect("probe row present");
+        let got = crate::orders::get(&probe)
+            .await
+            .unwrap()
+            .expect("probe row present");
         assert_eq!(got.item, "Probe");
         assert_eq!(got.amount, 7);
-        assert!(crate::orders::list().await.unwrap().iter().any(|o| o.instance_id == probe));
+        assert!(crate::orders::list()
+            .await
+            .unwrap()
+            .iter()
+            .any(|o| o.instance_id == probe));
 
         // 2) approve path -> persisted order + FULFILLED.
         let (status, row) = drive(&client, "Widget", 10, "approve").await;

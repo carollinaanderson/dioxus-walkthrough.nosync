@@ -15,7 +15,7 @@ pub struct OrderInput {
 pub struct OrderStatusDto {
     pub instance_id: String,
     pub item: String,
-    pub amount: u32,
+    pub amount: i64,
     pub stage: String,
     pub actionable: bool,
 }
@@ -24,14 +24,14 @@ pub struct OrderStatusDto {
 pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
     use crate::{orders, workflow};
     let instance_id = format!("order-{}", uuid::Uuid::new_v4());
-    let input = serde_json::to_string(&order).map_err(ServerFnError::new)?;
+    let input = serde_json::to_string(&order)?;
     workflow::client()
         .start_orchestration(instance_id.clone(), workflow::ORCHESTRATION_NAME, input)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(ServerFnError::new)?;
     orders::insert(&instance_id, &order.item, order.amount)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(ServerFnError::new)?;
     Ok(instance_id)
 }
 
@@ -40,29 +40,40 @@ pub async fn get_order_status(instance_id: String) -> ServerFnResult<OrderStatus
     use crate::{orders, workflow};
     let row = orders::get(&instance_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
-        .ok_or_else(|| ServerFnError::new(format!("order {instance_id} not found")))?;
+        .map_err(ServerFnError::new)?;
     let status = workflow::client()
         .get_orchestration_status(&instance_id)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(ServerFnError::new)?;
     let (stage, actionable) = workflow::stage_from_status(&status);
-    Ok(OrderStatusDto { instance_id: row.instance_id, item: row.item, amount: row.amount, stage, actionable })
+    Ok(OrderStatusDto {
+        instance_id: row.instance_id,
+        item: row.item,
+        amount: row.amount,
+        stage,
+        actionable,
+    })
 }
 
 #[server]
 pub async fn list_orders() -> ServerFnResult<Vec<OrderStatusDto>> {
     use crate::{orders, workflow};
     let client = workflow::client();
-    let rows = orders::list().await.map_err(|e| ServerFnError::new(e.to_string()))?;
+    let rows = orders::list().await.map_err(ServerFnError::new)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let status = client
             .get_orchestration_status(&row.instance_id)
             .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+            .map_err(ServerFnError::new)?;
         let (stage, actionable) = workflow::stage_from_status(&status);
-        out.push(OrderStatusDto { instance_id: row.instance_id, item: row.item, amount: row.amount, stage, actionable });
+        out.push(OrderStatusDto {
+            instance_id: row.instance_id,
+            item: row.item,
+            amount: row.amount,
+            stage,
+            actionable,
+        });
     }
     Ok(out)
 }
@@ -74,6 +85,6 @@ pub async fn submit_decision(instance_id: String, approve: bool) -> ServerFnResu
     workflow::client()
         .raise_event(instance_id, workflow::APPROVAL_EVENT, payload)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(ServerFnError::new)?;
     Ok(())
 }
