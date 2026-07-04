@@ -165,6 +165,61 @@ mod tests {
         );
     }
 
+    // Postgres-backed smoke test of the real duroxide-pg provider. Skips unless
+    // DUROXUS_TEST_PG is set. Run with:
+    //   DUROXUS_TEST_PG=postgres://duroxide:duroxide@localhost:5432/duroxide \
+    //     cargo test --features test-support --no-default-features pg_ -- --nocapture --test-threads=1
+    async fn pg_run(instance: &str, decision: &str, schema: &str) -> OrchestrationStatus {
+        let url = std::env::var("DUROXUS_TEST_PG").expect("DUROXUS_TEST_PG");
+        let store: Arc<dyn Provider> = Arc::new(
+            duroxide_pg::PostgresProvider::new_with_schema(&url, Some(schema))
+                .await
+                .unwrap(),
+        );
+        let (activities, orchestrations) = registries();
+        let rt = Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+        std::mem::forget(rt);
+        let client = Arc::new(Client::new(store));
+        let input = serde_json::json!({"item":"widget","amount":10}).to_string();
+        client
+            .start_orchestration(instance, ORCHESTRATION_NAME, input)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        client
+            .raise_event(instance, APPROVAL_EVENT, decision)
+            .await
+            .unwrap();
+        client
+            .wait_for_orchestration(instance, Duration::from_secs(15))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pg_approve_path_fulfills() {
+        if std::env::var("DUROXUS_TEST_PG").is_err() {
+            return;
+        }
+        let out = pg_run("pg-approve", "approve", "duroxus_test").await;
+        assert!(
+            matches!(&out, OrchestrationStatus::Completed { output, .. } if output.contains("FULFILLED")),
+            "got {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_reject_path_refunds() {
+        if std::env::var("DUROXUS_TEST_PG").is_err() {
+            return;
+        }
+        let out = pg_run("pg-reject", "reject", "duroxus_test").await;
+        assert!(
+            matches!(&out, OrchestrationStatus::Completed { output, .. } if output.contains("REFUNDED")),
+            "got {out:?}"
+        );
+    }
+
     #[tokio::test]
     async fn reject_path_refunds() {
         let client = test_client().await;

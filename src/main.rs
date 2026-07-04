@@ -7,6 +7,29 @@ use app::App;
 #[cfg(feature = "server")]
 mod workflow;
 
+// Client (wasm) entrypoint.
+#[cfg(not(feature = "server"))]
 fn main() {
     dioxus::launch(App);
+}
+
+// Server entrypoint: load env, boot the embedded duroxide runtime + Client,
+// then serve the Dioxus app (which also registers the #[server] functions).
+#[cfg(feature = "server")]
+#[tokio::main]
+async fn main() {
+    dotenvy::dotenv().ok();
+    let database_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (see .env)");
+
+    workflow::init(&database_url)
+        .await
+        .expect("failed to initialize duroxide runtime");
+
+    use dioxus::server::{DioxusRouterExt, ServeConfig};
+    let address = dioxus::cli_config::fullstack_address_or_localhost();
+    let router = axum::Router::new().serve_dioxus_application(ServeConfig::new(), App);
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    println!("listening on http://{address}");
+    axum::serve(listener, router).await.unwrap();
 }
