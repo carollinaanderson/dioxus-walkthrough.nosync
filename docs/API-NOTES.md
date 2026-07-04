@@ -52,6 +52,31 @@ enum OrchestrationStatus {
 - `async SqliteProvider::new_in_memory() -> Result<Self, sqlx::Error>`
 - `async SqliteProvider::new(database_url: &str, options: Option<SqliteOptions>) -> Result<Self, sqlx::Error>`
 
-### Consequence for Cargo.toml
-Add a `test-support = ["server", "duroxide/sqlite"]` feature and run the workflow tests with:
-`cargo test --features test-support --no-default-features`
+### Consequence for Cargo.toml (historical)
+The SQLite provider was originally used for tests via a `test-support = ["server", "duroxide/sqlite"]`
+feature. That was **removed** once orders moved to Postgres — tests now require Docker Postgres (below).
+
+## duroxide-pg pool reuse & app storage (sqlx)
+- `PostgresProvider::pool(&self) -> &PgPool` (provider.rs:511) — Arc-backed; `provider.pool().clone()`
+  shares the SAME pool. Used by `orders::init` so the app has one pool for both duroxide and orders.
+- Pool config: `max_connections` defaults to 10 (override via `DUROXIDE_PG_POOL_MAX`), `acquire_timeout`
+  30s. Raw connection-count is rarely the bottleneck; runtime contention is (see below).
+- duroxide-pg does NOT set a persistent `search_path`; it fully-qualifies its own queries and uses
+  `SET LOCAL` only inside its migration txn. So the app's `orders` table (unqualified) lives in the
+  pool's default schema (`public` for `PostgresProvider::new`). No conflict with duroxide tables.
+- App schema is a sqlx migration: `migrations/0001_create_orders.sql`, run via
+  `sqlx::migrate!("./migrations").run(&pool)`. sqlx tracks state in `_sqlx_migrations`
+  (distinct from duroxide's `_duroxide_migrations`).
+- sqlx 0.8.6, runtime query API (no `query!` macro → no build-time DB needed).
+
+## Runtime lifecycle (important for tests)
+- `Runtime::start_with_store(...) -> Arc<Runtime>` spawns background dispatcher tasks. **Dropping the
+  `Arc` does NOT stop them** — call `rt.shutdown(Some(timeout_ms)).await` (runtime/mod.rs:1010).
+- duroxide expects ONE runtime per store/schema. Multiple runtimes over the same schema/queues
+  contend and deadlock (observed as `database is deadlocked` retries → `PoolTimedOut`).
+- Consequence for tests: each `#[tokio::test]` gets its own tokio runtime, and a sqlx pool / duroxide
+  dispatchers are bound to their creating runtime — they can't be shared across test fns. So the PG
+  integration lives in ONE test (`workflow::tests::postgres_order_lifecycle`) with a single runtime.
+
+### Test command
+`DATABASE_URL=postgres://duroxide:duroxide@localhost:5432/duroxide cargo test --features server --no-default-features -- --test-threads=1`

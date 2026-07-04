@@ -39,26 +39,33 @@ Open the URL printed by `dx serve`.
 
 Create an order, leave it at *awaiting approval*, then `docker compose restart`. The
 orchestration state survives in Postgres and resumes; approving it still completes the
-workflow. (The dashboard's list of instance ids is kept in memory and resets when the app
-restarts — the workflows themselves are the durable part, in Postgres.)
+workflow. (Orders are stored in the `orders` table in Postgres, so the dashboard list also
+survives restart — not just the workflow execution state.)
 
 ## Tests
 
+Tests run against real Postgres (start it first with `docker compose up -d`):
+
 ```bash
-cargo test --features test-support --no-default-features
+DATABASE_URL=postgres://duroxide:duroxide@localhost:5432/duroxide \
+  cargo test --features server --no-default-features -- --test-threads=1
 ```
 
-Runs the `OrderApproval` orchestration through duroxide's in-memory SQLite provider
-(no Postgres needed), covering both the approve → **FULFILLED** and reject → **REFUNDED**
-paths. The Postgres provider is exercised at runtime via the demo above.
+`workflow::postgres_order_lifecycle` drives the full flow against Postgres: the sqlx `orders`
+store (insert/get/list) plus the orchestration's approve → **FULFILLED** and reject →
+**REFUNDED** (saga compensation) paths, asserting the persisted order rows. It is a single test
+with one duroxide runtime — see `docs/API-NOTES.md` (a sqlx pool and duroxide dispatchers are
+bound to their creating tokio runtime, and duroxide expects one runtime per store/schema).
 
 ## Project layout
 
 ```
 src/main.rs      # client launch + server entrypoint (env → workflow::init → serve)
 src/app.rs       # UI: order form, polling status table, approve/reject
-src/server.rs    # #[server] functions bridging the UI to the duroxide Client
+src/server.rs    # #[server] functions bridging the UI to the duroxide Client + orders store
 src/workflow.rs  # (server-only) orchestration, activities, runtime bootstrap, globals
+src/orders.rs    # (server-only) sqlx orders table, reusing duroxide-pg's pool
+migrations/      # sqlx migrations (0001_create_orders.sql)
 docs/API-NOTES.md            # confirmed duroxide/duroxide-pg API signatures used here
 docs/superpowers/            # design spec + implementation plan
 docker-compose.yml           # postgres:16
