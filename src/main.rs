@@ -1,6 +1,9 @@
 #![allow(non_snake_case)]
 use dioxus::prelude::*;
 
+#[cfg(feature = "server")]
+mod workflow;
+
 fn main() {
     dioxus::launch(App);
 }
