@@ -15,6 +15,7 @@ duroxide = { version = "0.1", optional = true }
 duroxide-pg = { version = "0.1", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 dotenvy = { version = "0.15", optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "migrate"], optional = true }
 
 # Client-only: interval sleep for the status-polling loop.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -23,9 +24,7 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-server = ["dioxus/server", "dep:axum", "dep:tokio", "dep:duroxide", "dep:duroxide-pg", "dep:uuid", "dep:dotenvy"]
-# Enables duroxide's in-memory SQLite provider for the workflow unit tests (no Postgres needed).
-test-support = ["server", "duroxide/sqlite"]
+server = ["dioxus/server", "dep:axum", "dep:tokio", "dep:duroxide", "dep:duroxide-pg", "dep:uuid", "dep:dotenvy", "dep:sqlx"]
 
 [profile.dev]
 opt-level = 1

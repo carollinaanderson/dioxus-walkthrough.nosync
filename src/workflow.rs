@@ -4,7 +4,7 @@
 //! Signatures here are pinned against duroxide 0.1.29 / duroxide-pg 0.1.34 —
 //! see `docs/API-NOTES.md`.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use duroxide::providers::Provider;
@@ -21,21 +21,10 @@ const APPROVAL_TIMEOUT_SECS: u64 = 120;
 
 static CLIENT: OnceLock<Arc<Client>> = OnceLock::new();
 static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new(); // keep the runtime alive
-static ORDERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// The shared duroxide control-plane client. Panics if `init` has not run.
 pub fn client() -> Arc<Client> {
     CLIENT.get().expect("workflow::init not called").clone()
-}
-
-/// Remember an instance id so the dashboard can list it.
-pub fn record_order(instance_id: &str) {
-    ORDERS.lock().unwrap().push(instance_id.to_string());
-}
-
-/// All instance ids started this process (in-memory; resets on restart).
-pub fn all_orders() -> Vec<String> {
-    ORDERS.lock().unwrap().clone()
 }
 
 // ---- Activities: stubs (log + echo). Kept trivial so the PoC is about orchestration. ----
@@ -118,6 +107,8 @@ pub async fn init(database_url: &str) -> Result<(), String> {
     let provider = PostgresProvider::new(database_url)
         .await
         .map_err(|e| e.to_string())?;
+    // Reuse duroxide-pg's pool for the orders table.
+    crate::orders::init(provider.pool().clone()).await?;
     let store: Arc<dyn Provider> = Arc::new(provider);
     let (activities, orchestrations) = registries();
     let rt = Runtime::start_with_store(store.clone(), activities, orchestrations).await;
@@ -129,117 +120,75 @@ pub async fn init(database_url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use duroxide::providers::sqlite::SqliteProvider;
+    use duroxide_pg::PostgresProvider;
 
-    // Build an in-memory-SQLite-backed client + running runtime for tests.
-    async fn test_client() -> Arc<Client> {
-        let store: Arc<dyn Provider> =
-            Arc::new(SqliteProvider::new_in_memory().await.unwrap());
-        let (activities, orchestrations) = registries();
-        let rt = Runtime::start_with_store(store.clone(), activities, orchestrations).await;
-        std::mem::forget(rt); // keep runtime workers alive for the test process
-        Arc::new(Client::new(store))
-    }
+    // Full order lifecycle against real Postgres (requires DATABASE_URL + docker).
+    //
+    // This is a SINGLE test on purpose: each `#[tokio::test]` gets its own tokio
+    // runtime, and both the sqlx pool and duroxide's spawned dispatchers are bound
+    // to the runtime that created them — so they cannot be shared across separate
+    // test functions. duroxide also expects ONE runtime per store/schema; a second
+    // runtime on the same `public` queues contends and deadlocks. So we run one
+    // runtime and drive every case here. Isolated by unique instance ids.
+    async fn drive(
+        client: &Client,
+        item: &str,
+        amount: u32,
+        decision: &str,
+    ) -> (OrchestrationStatus, crate::orders::OrderRow) {
+        let instance = format!("wf-{decision}-{}", uuid::Uuid::new_v4());
+        let input = serde_json::json!({ "item": item, "amount": amount }).to_string();
+        client.start_orchestration(&instance, ORCHESTRATION_NAME, input).await.unwrap();
+        crate::orders::insert(&instance, item, amount).await.unwrap();
 
-    #[tokio::test]
-    async fn approve_path_fulfills() {
-        let client = test_client().await;
-        let input = serde_json::json!({"item":"widget","amount":10}).to_string();
-        client
-            .start_orchestration("t-approve", ORCHESTRATION_NAME, input)
-            .await
-            .unwrap();
-        // let it reach the approval wait, then approve
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        client
-            .raise_event("t-approve", APPROVAL_EVENT, "approve")
-            .await
-            .unwrap();
-        let out = client
-            .wait_for_orchestration("t-approve", Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert!(
-            matches!(&out, OrchestrationStatus::Completed { output, .. } if output.contains("FULFILLED")),
-            "got {out:?}"
-        );
-    }
-
-    // Postgres-backed smoke test of the real duroxide-pg provider. Skips unless
-    // DUROXUS_TEST_PG is set. Run with:
-    //   DUROXUS_TEST_PG=postgres://duroxide:duroxide@localhost:5432/duroxide \
-    //     cargo test --features test-support --no-default-features pg_ -- --nocapture --test-threads=1
-    async fn pg_run(instance: &str, decision: &str, schema: &str) -> OrchestrationStatus {
-        let url = std::env::var("DUROXUS_TEST_PG").expect("DUROXUS_TEST_PG");
-        let store: Arc<dyn Provider> = Arc::new(
-            duroxide_pg::PostgresProvider::new_with_schema(&url, Some(schema))
-                .await
-                .unwrap(),
-        );
-        let (activities, orchestrations) = registries();
-        let rt = Runtime::start_with_store(store.clone(), activities, orchestrations).await;
-        std::mem::forget(rt);
-        let client = Arc::new(Client::new(store));
-        let input = serde_json::json!({"item":"widget","amount":10}).to_string();
-        client
-            .start_orchestration(instance, ORCHESTRATION_NAME, input)
-            .await
-            .unwrap();
         tokio::time::sleep(Duration::from_millis(700)).await;
-        client
-            .raise_event(instance, APPROVAL_EVENT, decision)
+        client.raise_event(&instance, APPROVAL_EVENT, decision).await.unwrap();
+        let status = client
+            .wait_for_orchestration(&instance, Duration::from_secs(15))
             .await
             .unwrap();
-        client
-            .wait_for_orchestration(instance, Duration::from_secs(15))
-            .await
-            .unwrap()
+        let row = crate::orders::get(&instance).await.unwrap().expect("order row present");
+        (status, row)
     }
 
     #[tokio::test]
-    async fn pg_approve_path_fulfills() {
-        if std::env::var("DUROXUS_TEST_PG").is_err() {
-            return;
-        }
-        let out = pg_run("pg-approve", "approve", "duroxus_test").await;
-        assert!(
-            matches!(&out, OrchestrationStatus::Completed { output, .. } if output.contains("FULFILLED")),
-            "got {out:?}"
-        );
-    }
+    async fn postgres_order_lifecycle() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL (docker postgres) required");
+        let provider = PostgresProvider::new(&url).await.unwrap();
+        // orders reuses duroxide-pg's pool, exactly like the app.
+        crate::orders::init(provider.pool().clone()).await.unwrap();
 
-    #[tokio::test]
-    async fn pg_reject_path_refunds() {
-        if std::env::var("DUROXUS_TEST_PG").is_err() {
-            return;
-        }
-        let out = pg_run("pg-reject", "reject", "duroxus_test").await;
-        assert!(
-            matches!(&out, OrchestrationStatus::Completed { output, .. } if output.contains("REFUNDED")),
-            "got {out:?}"
-        );
-    }
+        let store: Arc<dyn Provider> = Arc::new(provider);
+        let (activities, orchestrations) = registries();
+        let rt = Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+        let client = Arc::new(Client::new(store));
 
-    #[tokio::test]
-    async fn reject_path_refunds() {
-        let client = test_client().await;
-        let input = serde_json::json!({"item":"widget","amount":10}).to_string();
-        client
-            .start_orchestration("t-reject", ORCHESTRATION_NAME, input)
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        client
-            .raise_event("t-reject", APPROVAL_EVENT, "reject")
-            .await
-            .unwrap();
-        let out = client
-            .wait_for_orchestration("t-reject", Duration::from_secs(10))
-            .await
-            .unwrap();
+        // 1) orders store CRUD sanity (same shared pool).
+        let probe = format!("probe-{}", uuid::Uuid::new_v4());
+        crate::orders::insert(&probe, "Probe", 7).await.unwrap();
+        let got = crate::orders::get(&probe).await.unwrap().expect("probe row present");
+        assert_eq!(got.item, "Probe");
+        assert_eq!(got.amount, 7);
+        assert!(crate::orders::list().await.unwrap().iter().any(|o| o.instance_id == probe));
+
+        // 2) approve path -> persisted order + FULFILLED.
+        let (status, row) = drive(&client, "Widget", 10, "approve").await;
+        assert_eq!(row.item, "Widget");
+        assert_eq!(row.amount, 10);
         assert!(
-            matches!(&out, OrchestrationStatus::Completed { output, .. } if output.contains("REFUNDED")),
-            "got {out:?}"
+            matches!(&status, OrchestrationStatus::Completed { output, .. } if output.contains("FULFILLED")),
+            "approve got {status:?}"
         );
+
+        // 3) reject path -> persisted order + REFUNDED (saga compensation).
+        let (status, row) = drive(&client, "Gadget", 42, "reject").await;
+        assert_eq!(row.item, "Gadget");
+        assert_eq!(row.amount, 42);
+        assert!(
+            matches!(&status, OrchestrationStatus::Completed { output, .. } if output.contains("REFUNDED")),
+            "reject got {status:?}"
+        );
+
+        rt.shutdown(Some(2000)).await;
     }
 }

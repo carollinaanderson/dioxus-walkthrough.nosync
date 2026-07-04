@@ -5,6 +5,9 @@ mod server;
 use app::App;
 
 #[cfg(feature = "server")]
+mod orders;
+
+#[cfg(feature = "server")]
 mod workflow;
 
 // Client (wasm) entrypoint.

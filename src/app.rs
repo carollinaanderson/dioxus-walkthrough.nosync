@@ -76,7 +76,7 @@ pub fn App() -> Element {
                 } else {
                     table {
                         thead {
-                            tr { th { "Instance" } th { "Stage" } th { "Action" } }
+                            tr { th { "Item" } th { "Amount" } th { "Instance" } th { "Stage" } th { "Action" } }
                         }
                         tbody {
                             for o in orders() {
@@ -96,6 +96,8 @@ fn OrderRow(order: OrderStatusDto) -> Element {
     let reject_id = order.instance_id.clone();
     rsx! {
         tr {
+            td { "{order.item}" }
+            td { "{order.amount}" }
             td { class: "mono", "{order.instance_id}" }
             td {
                 span { class: stage_class(&order.stage), "{order.stage}" }
