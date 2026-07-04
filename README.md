@@ -67,7 +67,6 @@ src/workflow.rs  # (server-only) orchestration, activities, runtime bootstrap, g
 src/orders.rs    # (server-only) sqlx orders table, reusing duroxide-pg's pool
 migrations/      # sqlx migrations (0001_create_orders.sql)
 docs/API-NOTES.md            # confirmed duroxide/duroxide-pg API signatures used here
-docs/superpowers/            # design spec + implementation plan
 docker-compose.yml           # postgres:16
 ```
 
