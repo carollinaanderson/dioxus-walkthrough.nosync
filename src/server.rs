@@ -20,32 +20,36 @@ pub struct OrderStatusDto {
     pub actionable: bool,
 }
 
-#[server]
+#[server(axum::Extension(state): axum::Extension<crate::state::AppState>)]
 pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
-    use crate::{orders, workflow};
     let instance_id = format!("order-{}", uuid::Uuid::new_v4());
     let input = serde_json::to_string(&order)?;
-    workflow::client()
-        .start_orchestration(instance_id.clone(), workflow::ORCHESTRATION_NAME, input)
+    state
+        .client
+        .start_orchestration(
+            instance_id.clone(),
+            crate::workflow::ORCHESTRATION_NAME,
+            input,
+        )
         .await
         .map_err(ServerFnError::new)?;
-    orders::insert(&instance_id, &order.item, order.amount)
+    crate::orders::insert(&state.pool, &instance_id, &order.item, order.amount)
         .await
         .map_err(ServerFnError::new)?;
     Ok(instance_id)
 }
 
-#[server]
+#[server(axum::Extension(state): axum::Extension<crate::state::AppState>)]
 pub async fn get_order_status(instance_id: String) -> ServerFnResult<OrderStatusDto> {
-    use crate::{orders, workflow};
-    let row = orders::get(&instance_id)
+    let row = crate::orders::get(&state.pool, &instance_id)
         .await
         .map_err(ServerFnError::new)?;
-    let status = workflow::client()
+    let status = state
+        .client
         .get_orchestration_status(&instance_id)
         .await
         .map_err(ServerFnError::new)?;
-    let (stage, actionable) = workflow::stage_from_status(&status);
+    let (stage, actionable) = crate::workflow::stage_from_status(&status);
     Ok(OrderStatusDto {
         instance_id: row.instance_id,
         item: row.item,
@@ -55,18 +59,19 @@ pub async fn get_order_status(instance_id: String) -> ServerFnResult<OrderStatus
     })
 }
 
-#[server]
+#[server(axum::Extension(state): axum::Extension<crate::state::AppState>)]
 pub async fn list_orders() -> ServerFnResult<Vec<OrderStatusDto>> {
-    use crate::{orders, workflow};
-    let client = workflow::client();
-    let rows = orders::list().await.map_err(ServerFnError::new)?;
+    let rows = crate::orders::list(&state.pool)
+        .await
+        .map_err(ServerFnError::new)?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let status = client
+        let status = state
+            .client
             .get_orchestration_status(&row.instance_id)
             .await
             .map_err(ServerFnError::new)?;
-        let (stage, actionable) = workflow::stage_from_status(&status);
+        let (stage, actionable) = crate::workflow::stage_from_status(&status);
         out.push(OrderStatusDto {
             instance_id: row.instance_id,
             item: row.item,
@@ -78,12 +83,12 @@ pub async fn list_orders() -> ServerFnResult<Vec<OrderStatusDto>> {
     Ok(out)
 }
 
-#[server]
+#[server(axum::Extension(state): axum::Extension<crate::state::AppState>)]
 pub async fn submit_decision(instance_id: String, approve: bool) -> ServerFnResult<()> {
-    use crate::workflow;
     let payload = if approve { "approve" } else { "reject" };
-    workflow::client()
-        .raise_event(instance_id, workflow::APPROVAL_EVENT, payload)
+    state
+        .client
+        .raise_event(instance_id, crate::workflow::APPROVAL_EVENT, payload)
         .await
         .map_err(ServerFnError::new)?;
     Ok(())

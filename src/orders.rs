@@ -2,11 +2,7 @@
 //! `PgPool` (see docs/API-NOTES.md). Schema is applied via the sqlx migration
 //! in `migrations/`.
 
-use std::sync::OnceLock;
-
 use sqlx::{migrate::MigrateError, prelude::FromRow, PgPool};
-
-static POOL: OnceLock<PgPool> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct OrderRow {
@@ -15,42 +11,40 @@ pub struct OrderRow {
     pub amount: i64,
 }
 
-/// Store the (shared) pool and apply pending sqlx migrations.
-pub async fn init(pool: PgPool) -> Result<(), MigrateError> {
-    sqlx::migrate!("./migrations").run(&pool).await?;
-    let _ = POOL.set(pool);
-    Ok(())
+/// Apply pending sqlx migrations against the (shared) pool.
+pub async fn init(pool: &PgPool) -> Result<(), MigrateError> {
+    sqlx::migrate!("./migrations").run(pool).await
 }
 
-/// Clone of the stored pool. Panics if `init` has not run.
-pub fn pool() -> PgPool {
-    POOL.get().expect("orders::init not called").clone()
-}
-
-pub async fn insert(instance_id: &str, item: &str, amount: u32) -> Result<(), sqlx::Error> {
+pub async fn insert(
+    pool: &PgPool,
+    instance_id: &str,
+    item: &str,
+    amount: u32,
+) -> Result<(), sqlx::Error> {
     sqlx::query("INSERT INTO orders (instance_id, item, amount) VALUES ($1, $2, $3)")
         .bind(instance_id)
         .bind(item)
         .bind(amount as i64)
-        .execute(&pool())
+        .execute(pool)
         .await?;
     Ok(())
 }
 
-pub async fn list() -> Result<Vec<OrderRow>, sqlx::Error> {
+pub async fn list(pool: &PgPool) -> Result<Vec<OrderRow>, sqlx::Error> {
     sqlx::query_as::<_, OrderRow>(
         "SELECT instance_id, item, amount FROM orders ORDER BY created_at DESC",
     )
-    .fetch_all(&pool())
+    .fetch_all(pool)
     .await
 }
 
-pub async fn get(instance_id: &str) -> Result<OrderRow, sqlx::Error> {
+pub async fn get(pool: &PgPool, instance_id: &str) -> Result<OrderRow, sqlx::Error> {
     sqlx::query_as::<_, OrderRow>(
         "SELECT instance_id, item, amount FROM orders WHERE instance_id = $1",
     )
     .bind(instance_id)
-    .fetch_one(&pool())
+    .fetch_one(pool)
     .await
 }
 

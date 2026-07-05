@@ -4,7 +4,7 @@
 //! Signatures here are pinned against duroxide 0.1.29 / duroxide-pg 0.1.34 —
 //! see `docs/API-NOTES.md`.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use duroxide::providers::Provider;
@@ -14,26 +14,35 @@ use duroxide::{
     ActivityContext, Client, Either2, OrchestrationContext, OrchestrationRegistry,
     OrchestrationStatus,
 };
+use duroxide_pg::PostgresProvider;
+use sqlx::PgPool;
 
 pub const ORCHESTRATION_NAME: &str = "OrderApproval";
 pub const APPROVAL_EVENT: &str = "approval";
 const APPROVAL_TIMEOUT_SECS: u64 = 120;
 
-static CLIENT: OnceLock<Arc<Client>> = OnceLock::new();
-static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new(); // keep the runtime alive
-
-/// The shared duroxide control-plane client. Panics if `init` has not run.
-pub fn client() -> Arc<Client> {
-    CLIENT.get().expect("workflow::init not called").clone()
-}
-
-// ---- Activities: stubs (log + echo). Kept trivial so the PoC is about orchestration. ----
-fn registries() -> (ActivityRegistry, OrchestrationRegistry) {
+// ---- Activities: stubs (log + echo), registered as closures so any future
+//      state they need (e.g. a PgPool) is captured directly rather than
+//      reached for through a static. Kept trivial so the PoC is about
+//      orchestration. ----
+fn registries(pool: PgPool) -> (ActivityRegistry, OrchestrationRegistry) {
     let activities = ActivityRegistry::builder()
-        .register("ValidateOrder", validate_order)
-        .register("ChargePayment", charge_payment)
-        .register("FulfillOrder", fulfill_order)
-        .register("RefundPayment", refund_payment)
+        .register("ValidateOrder", {
+            let pool = pool.clone();
+            move |ctx, input| validate_order(pool.clone(), ctx, input)
+        })
+        .register("ChargePayment", {
+            let pool = pool.clone();
+            move |ctx, input| charge_payment(pool.clone(), ctx, input)
+        })
+        .register("FulfillOrder", {
+            let pool = pool.clone();
+            move |ctx, input| fulfill_order(pool.clone(), ctx, input)
+        })
+        .register("RefundPayment", {
+            let pool = pool.clone();
+            move |ctx, input| refund_payment(pool.clone(), ctx, input)
+        })
         .build();
 
     let orchestrations = OrchestrationRegistry::builder()
@@ -43,19 +52,35 @@ fn registries() -> (ActivityRegistry, OrchestrationRegistry) {
     (activities, orchestrations)
 }
 
-async fn validate_order(_ctx: ActivityContext, input: String) -> Result<String, String> {
+async fn validate_order(
+    _pool: PgPool,
+    _ctx: ActivityContext,
+    input: String,
+) -> Result<String, String> {
     Ok(format!("validated:{input}"))
 }
 
-async fn charge_payment(_ctx: ActivityContext, input: String) -> Result<String, String> {
+async fn charge_payment(
+    _pool: PgPool,
+    _ctx: ActivityContext,
+    input: String,
+) -> Result<String, String> {
     Ok(format!("charged:{input}"))
 }
 
-async fn fulfill_order(_ctx: ActivityContext, input: String) -> Result<String, String> {
+async fn fulfill_order(
+    _pool: PgPool,
+    _ctx: ActivityContext,
+    input: String,
+) -> Result<String, String> {
     Ok(format!("fulfilled:{input}"))
 }
 
-async fn refund_payment(_ctx: ActivityContext, input: String) -> Result<String, String> {
+async fn refund_payment(
+    _pool: PgPool,
+    _ctx: ActivityContext,
+    input: String,
+) -> Result<String, String> {
     Ok(format!("refunded:{input}"))
 }
 
@@ -111,18 +136,22 @@ pub fn stage_from_status(status: &OrchestrationStatus) -> (String, bool) {
     }
 }
 
-/// Bootstrap the workflow runtime and control-plane client.
-pub async fn init(provider: impl Provider) {
+/// Bootstrap the workflow runtime and control-plane client. The caller owns
+/// both handles for the life of the process (e.g. by holding them in `main`)
+/// instead of stashing them in statics.
+pub async fn init(provider: PostgresProvider) -> (Arc<Runtime>, Arc<Client>) {
+    let (activities, orchestrations) = registries(provider.pool().clone());
     let store: Arc<dyn Provider> = Arc::new(provider);
-    let (activities, orchestrations) = registries();
-    let _ = RUNTIME.set(Runtime::start_with_store(store.clone(), activities, orchestrations).await);
-    let _ = CLIENT.set(Arc::new(Client::new(store)));
+    let runtime = Runtime::start_with_store(store.clone(), activities, orchestrations).await;
+    let client = Arc::new(Client::new(store));
+    (runtime, client)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::state::AppState;
+
     use super::*;
-    use duroxide_pg::PostgresProvider;
 
     // Full order lifecycle against real Postgres (requires DATABASE_URL + docker).
     //
@@ -134,6 +163,7 @@ mod tests {
     // runtime and drive every case here. Isolated by unique instance ids.
     async fn drive(
         client: &Client,
+        pool: &sqlx::PgPool,
         item: &str,
         amount: u32,
         decision: &str,
@@ -144,7 +174,7 @@ mod tests {
             .start_orchestration(&instance, ORCHESTRATION_NAME, input)
             .await
             .unwrap();
-        crate::orders::insert(&instance, item, amount)
+        crate::orders::insert(pool, &instance, item, amount)
             .await
             .unwrap();
 
@@ -157,42 +187,30 @@ mod tests {
             .wait_for_orchestration(&instance, Duration::from_secs(15))
             .await
             .unwrap();
-        let row = crate::orders::get(&instance)
-            .await
-            .unwrap()
-            .expect("order row present");
+        let row = crate::orders::get(pool, &instance).await.unwrap();
         (status, row)
     }
 
     #[tokio::test]
     async fn postgres_order_lifecycle() {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL (docker postgres) required");
-        let provider = PostgresProvider::new(&url).await.unwrap();
-        // orders reuses duroxide-pg's pool, exactly like the app.
-        crate::orders::init(provider.pool().clone()).await.unwrap();
-
-        let store: Arc<dyn Provider> = Arc::new(provider);
-        let (activities, orchestrations) = registries();
-        let rt = Runtime::start_with_store(store.clone(), activities, orchestrations).await;
-        let client = Arc::new(Client::new(store));
+        let state = AppState::new().await;
 
         // 1) orders store CRUD sanity (same shared pool).
         let probe = format!("probe-{}", uuid::Uuid::new_v4());
-        crate::orders::insert(&probe, "Probe", 7).await.unwrap();
-        let got = crate::orders::get(&probe)
+        crate::orders::insert(&state.pool, &probe, "Probe", 7)
             .await
-            .unwrap()
-            .expect("probe row present");
+            .unwrap();
+        let got = crate::orders::get(&state.pool, &probe).await.unwrap();
         assert_eq!(got.item, "Probe");
         assert_eq!(got.amount, 7);
-        assert!(crate::orders::list()
+        assert!(crate::orders::list(&state.pool)
             .await
             .unwrap()
             .iter()
             .any(|o| o.instance_id == probe));
 
         // 2) approve path -> persisted order + FULFILLED.
-        let (status, row) = drive(&client, "Widget", 10, "approve").await;
+        let (status, row) = drive(&state.client, &state.pool, "Widget", 10, "approve").await;
         assert_eq!(row.item, "Widget");
         assert_eq!(row.amount, 10);
         assert!(
@@ -201,7 +219,7 @@ mod tests {
         );
 
         // 3) reject path -> persisted order + REFUNDED (saga compensation).
-        let (status, row) = drive(&client, "Gadget", 42, "reject").await;
+        let (status, row) = drive(&state.client, &state.pool, "Gadget", 42, "reject").await;
         assert_eq!(row.item, "Gadget");
         assert_eq!(row.amount, 42);
         assert!(
@@ -209,6 +227,6 @@ mod tests {
             "reject got {status:?}"
         );
 
-        rt.shutdown(Some(2000)).await;
+        state._runtime.shutdown(Some(2000)).await;
     }
 }
