@@ -1,101 +1,26 @@
 #![allow(non_snake_case)]
-//! Interim single-page UI (Task 2 replaces this with a routed multi-page app):
-//! create an order and watch the job pipeline's status via polling.
+//! App shell: router + shared styles. Pages live in `crate::pages`.
 
 use dioxus::prelude::*;
 
-use crate::server::{list_orders, start_order, OrderDto, OrderInput};
+use crate::pages::login::LoginPage;
+use crate::pages::orders::OrdersPage;
+use crate::pages::register::RegisterPage;
 
-/// Interval sleep for the polling loop. The loop only ever runs on the wasm
-/// client (`use_future` does not run during native SSR); the non-wasm arm just
-/// has to compile, so it parks forever without pulling in a native timer crate.
-async fn sleep_ms(_ms: u32) {
-    #[cfg(target_arch = "wasm32")]
-    gloo_timers::future::TimeoutFuture::new(_ms).await;
-    #[cfg(not(target_arch = "wasm32"))]
-    std::future::pending::<()>().await;
+#[derive(Routable, Clone, PartialEq)]
+pub enum Route {
+    #[route("/")]
+    OrdersPage {},
+    #[route("/login")]
+    LoginPage {},
+    #[route("/register")]
+    RegisterPage {},
 }
 
 pub fn App() -> Element {
-    let mut item = use_signal(|| "Widget".to_string());
-    let mut amount = use_signal(|| "10".to_string());
-    let mut orders = use_signal(Vec::<OrderDto>::new);
-    let mut error = use_signal(|| Option::<String>::None);
-
-    use_future(move || async move {
-        loop {
-            match list_orders().await {
-                Ok(list) => orders.set(list),
-                Err(e) => error.set(Some(e.to_string())),
-            }
-            sleep_ms(1500).await;
-        }
-    });
-
-    let create = move |_| async move {
-        let amt = amount().trim().parse::<u32>().unwrap_or(0);
-        match start_order(OrderInput {
-            item: item(),
-            amount: amt,
-        })
-        .await
-        {
-            Ok(_) => error.set(None),
-            Err(e) => error.set(Some(e.to_string())),
-        }
-    };
-
     rsx! {
         style { {CSS} }
-        main { class: "wrap",
-            h1 { "Duroxus" }
-            p { class: "sub", "Dioxus server functions driving a graphile_worker order pipeline." }
-
-            section { class: "card",
-                h2 { "New order" }
-                div { class: "row",
-                    input {
-                        value: "{item}",
-                        oninput: move |e| item.set(e.value()),
-                        placeholder: "Item",
-                    }
-                    input {
-                        r#type: "number",
-                        value: "{amount}",
-                        oninput: move |e| amount.set(e.value()),
-                        placeholder: "Amount",
-                    }
-                    button { class: "primary", onclick: create, "Create order" }
-                }
-            }
-
-            if let Some(e) = error() {
-                p { class: "err", "Error: {e}" }
-            }
-
-            section { class: "card",
-                h2 { "Orders" }
-                if orders().is_empty() {
-                    p { class: "muted", "No orders yet — create one above." }
-                } else {
-                    table {
-                        thead {
-                            tr { th { "Item" } th { "Amount" } th { "Id" } th { "Status" } }
-                        }
-                        tbody {
-                            for o in orders() {
-                                tr { key: "{o.id}",
-                                    td { "{o.item}" }
-                                    td { "{o.amount}" }
-                                    td { class: "mono", "{o.id}" }
-                                    td { span { class: status_class(&o.status), "{o.status}" } }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        Router::<Route> {}
     }
 }
 

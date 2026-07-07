@@ -13,6 +13,7 @@ pub struct CurrentUser {
 }
 
 /// Session key holding the logged-in user's uuid.
+#[cfg(feature = "server")]
 pub const SESSION_USER_KEY: &str = "user_id";
 
 /// Error message for unauthenticated requests. The UI matches on this string
