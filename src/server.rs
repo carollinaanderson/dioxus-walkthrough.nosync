@@ -37,7 +37,7 @@ pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     state
-        .utils
+        .worker
         .add_job(
             crate::jobs::ValidateOrder { order_id: row.id },
             graphile_worker::JobSpec::default(),

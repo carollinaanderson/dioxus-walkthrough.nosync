@@ -122,8 +122,7 @@ mod tests {
     /// picks up the chained jobs.
     #[tokio::test]
     async fn order_pipeline_runs_to_fulfilled() {
-        let (state, worker) = AppState::new().await;
-        let worker_handle = tokio::spawn(async move { worker.run().await });
+        let (state, worker_handle) = AppState::new().await;
 
         let hash = crate::auth::hash_password("hunter2-integration").unwrap();
         let username = format!("it-user-{}", uuid::Uuid::new_v4());
@@ -137,7 +136,7 @@ mod tests {
         assert_eq!(row.status, "queued");
 
         state
-            .utils
+            .worker
             .add_job(ValidateOrder { order_id: row.id }, JobSpec::default())
             .await
             .unwrap();

@@ -2,7 +2,7 @@
 //! the sqlx migrations in `migrations/`. Orders belong to a user and carry a
 //! `status` driven by the graphile_worker job pipeline in `jobs.rs`.
 
-use sqlx::{migrate::MigrateError, prelude::FromRow, PgPool};
+use sqlx::{prelude::FromRow, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, FromRow)]
@@ -12,11 +12,6 @@ pub struct OrderRow {
     pub item: String,
     pub amount: i64,
     pub status: String,
-}
-
-/// Apply pending sqlx migrations against the (shared) pool.
-pub async fn init(pool: &PgPool) -> Result<(), MigrateError> {
-    sqlx::migrate!("./migrations").run(pool).await
 }
 
 pub async fn insert(

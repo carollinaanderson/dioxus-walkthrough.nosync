@@ -1,24 +1,24 @@
 //! Server-only shared state, threaded into `#[server]` functions via
 //! `axum::Extension` instead of process-global statics.
 
-use std::sync::Arc;
-
-use graphile_worker::{Worker, WorkerOptions, WorkerUtils};
+use graphile_worker::runner::WorkerRuntimeError;
+use graphile_worker::{WorkerOptions, WorkerUtils};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tokio::task::JoinHandle;
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
-    pub utils: Arc<WorkerUtils>,
+    pub worker: WorkerUtils,
 }
 
 impl AppState {
     /// Connect Postgres, run app migrations, and initialize the
     /// graphile_worker worker (which creates/migrates its own
-    /// `graphile_worker` schema). Returns the state plus the worker for the
-    /// caller to `run()` — typically spawned as a background task.
-    pub async fn new() -> (Self, Worker) {
+    /// `graphile_worker` schema). Returns the state plus the worker background
+    /// task.
+    pub async fn new() -> (Self, JoinHandle<Result<(), WorkerRuntimeError>>) {
         dotenvy::dotenv().ok();
         let database_url =
             std::env::var("DATABASE_URL").expect("DATABASE_URL must be set (see .env)");
@@ -28,7 +28,8 @@ impl AppState {
             .connect(&database_url)
             .await
             .expect("failed to connect to postgres");
-        crate::orders::init(&pool)
+        sqlx::migrate!("./migrations")
+            .run(&pool)
             .await
             .expect("failed to run migrations");
 
@@ -42,8 +43,14 @@ impl AppState {
             .init()
             .await
             .expect("failed to initialize graphile_worker");
-        let utils = Arc::new(worker.create_utils());
-
-        (Self { pool, utils }, worker)
+        let worker_utils = worker.create_utils();
+        let worker_handle = tokio::spawn(async move { worker.run().await });
+        (
+            Self {
+                pool,
+                worker: worker_utils,
+            },
+            worker_handle,
+        )
     }
 }

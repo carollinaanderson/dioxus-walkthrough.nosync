@@ -25,12 +25,7 @@ fn main() {
     // graphile_worker worker, and serve the app with session + state layers.
     #[cfg(feature = "server")]
     dioxus::serve(|| async {
-        let (state, worker) = state::AppState::new().await;
-        tokio::spawn(async move {
-            if let Err(e) = worker.run().await {
-                eprintln!("graphile_worker exited: {e}");
-            }
-        });
+        let (state, _) = state::AppState::new().await;
 
         let session_store = tower_sessions_sqlx_store::PostgresStore::new(state.pool.clone());
         session_store
@@ -39,8 +34,8 @@ fn main() {
             .expect("failed to migrate session store");
         // `with_secure(false)` so the cookie works over plain http in dev;
         // set it to true behind TLS in production.
-        let session_layer = tower_sessions::SessionManagerLayer::new(session_store)
-            .with_secure(false);
+        let session_layer =
+            tower_sessions::SessionManagerLayer::new(session_store).with_secure(false);
 
         Ok(dioxus::server::router(App)
             .layer(session_layer)
