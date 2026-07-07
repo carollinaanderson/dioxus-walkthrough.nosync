@@ -1,0 +1,16 @@
+[package]
+name = "ch02-server-functions"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { version = "0.7", features = ["fullstack"] }
+
+# Server-only — not compiled into the WASM bundle.
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+server = ["dioxus/server", "dep:axum", "dep:tokio"]

@@ -1,0 +1,5 @@
+[application]
+name = "ch05-sessions"
+
+[web.app]
+title = "Tutorial — 5. Sessions"

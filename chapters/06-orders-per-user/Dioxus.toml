@@ -1,0 +1,5 @@
+[application]
+name = "ch06-orders-per-user"
+
+[web.app]
+title = "Tutorial — 6. Orders per user"

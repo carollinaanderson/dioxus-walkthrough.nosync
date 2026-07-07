@@ -1,0 +1,5 @@
+[application]
+name = "ch07-background-jobs"
+
+[web.app]
+title = "Tutorial — 7. Order Approval"

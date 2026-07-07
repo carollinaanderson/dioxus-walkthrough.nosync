@@ -1,0 +1,5 @@
+[application]
+name = "ch01-hello-dioxus"
+
+[web.app]
+title = "Tutorial — 1. Hello, Dioxus"

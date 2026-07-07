@@ -1,0 +1,5 @@
+[application]
+name = "ch03-orders-database"
+
+[web.app]
+title = "Tutorial — 3. Orders database"

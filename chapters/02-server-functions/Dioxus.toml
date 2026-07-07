@@ -1,0 +1,5 @@
+[application]
+name = "ch02-server-functions"
+
+[web.app]
+title = "Tutorial — 2. Server functions"

@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: myapp_ch06_postgres
+    environment:
+      POSTGRES_USER: myapp
+      POSTGRES_PASSWORD: myapp
+      POSTGRES_DB: myapp_ch06
+    ports:
+      - "5436:5432"
+    volumes:
+      - pgdata_ch06:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U myapp"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+volumes:
+  pgdata_ch06:
