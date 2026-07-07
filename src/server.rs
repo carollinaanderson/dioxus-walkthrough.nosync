@@ -1,6 +1,7 @@
-//! `#[server]` functions: the bridge between the Dioxus UI and the duroxide
-//! control-plane `Client`. Bodies run server-side only; the macro generates the
-//! client-side stubs.
+//! `#[server]` functions for orders: the bridge between the Dioxus UI and the
+//! Postgres order store + graphile_worker queue. Bodies run server-side only;
+//! the macros generate the client-side stubs. Each fn has an explicit HTTP
+//! endpoint so the API is stable and curl-able.
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -12,84 +13,58 @@ pub struct OrderInput {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct OrderStatusDto {
-    pub instance_id: String,
+pub struct OrderDto {
+    pub id: String,
     pub item: String,
     pub amount: i64,
-    pub stage: String,
-    pub actionable: bool,
+    pub status: String,
 }
 
-#[server(axum::Extension(state): axum::Extension<crate::state::AppState>)]
-pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
-    let instance_id = format!("order-{}", uuid::Uuid::new_v4());
-    let input = serde_json::to_string(&order)?;
-    state
-        .client
-        .start_orchestration(
-            instance_id.clone(),
-            crate::workflow::ORCHESTRATION_NAME,
-            input,
-        )
-        .await
-        .map_err(ServerFnError::new)?;
-    crate::orders::insert(&state.pool, &instance_id, &order.item, order.amount)
-        .await
-        .map_err(ServerFnError::new)?;
-    Ok(instance_id)
-}
-
-#[server(axum::Extension(state): axum::Extension<crate::state::AppState>)]
-pub async fn get_order_status(instance_id: String) -> ServerFnResult<OrderStatusDto> {
-    let row = crate::orders::get(&state.pool, &instance_id)
-        .await
-        .map_err(ServerFnError::new)?;
-    let status = state
-        .client
-        .get_orchestration_status(&instance_id)
-        .await
-        .map_err(ServerFnError::new)?;
-    let (stage, actionable) = crate::workflow::stage_from_status(&status);
-    Ok(OrderStatusDto {
-        instance_id: row.instance_id,
+#[cfg(feature = "server")]
+fn dto(row: crate::orders::OrderRow) -> OrderDto {
+    OrderDto {
+        id: row.id.to_string(),
         item: row.item,
         amount: row.amount,
-        stage,
-        actionable,
-    })
-}
-
-#[server(axum::Extension(state): axum::Extension<crate::state::AppState>)]
-pub async fn list_orders() -> ServerFnResult<Vec<OrderStatusDto>> {
-    let rows = crate::orders::list(&state.pool)
-        .await
-        .map_err(ServerFnError::new)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let status = state
-            .client
-            .get_orchestration_status(&row.instance_id)
-            .await
-            .map_err(ServerFnError::new)?;
-        let (stage, actionable) = crate::workflow::stage_from_status(&status);
-        out.push(OrderStatusDto {
-            instance_id: row.instance_id,
-            item: row.item,
-            amount: row.amount,
-            stage,
-            actionable,
-        });
+        status: row.status,
     }
-    Ok(out)
 }
 
-#[server(axum::Extension(state): axum::Extension<crate::state::AppState>)]
-pub async fn submit_decision(instance_id: String, approve: bool) -> ServerFnResult<()> {
-    let payload = if approve { "approve" } else { "reject" };
-    state
-        .client
-        .raise_event(instance_id, crate::workflow::APPROVAL_EVENT, payload)
+#[post("/api/orders/start", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
+    let user_id = crate::auth::require_user_id(&session).await?;
+    let row = crate::orders::insert(&state.pool, user_id, &order.item, order.amount)
         .await
-        .map_err(ServerFnError::new)?;
-    Ok(())
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    state
+        .utils
+        .add_job(
+            crate::jobs::ValidateOrder { order_id: row.id },
+            graphile_worker::JobSpec::default(),
+        )
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(row.id.to_string())
+}
+
+#[get("/api/orders/list", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+pub async fn list_orders() -> ServerFnResult<Vec<OrderDto>> {
+    let user_id = crate::auth::require_user_id(&session).await?;
+    let rows = crate::orders::list_for_user(&state.pool, user_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    Ok(rows.into_iter().map(dto).collect())
+}
+
+#[get("/api/orders/{id}", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+pub async fn get_order(id: String) -> ServerFnResult<OrderDto> {
+    let user_id = crate::auth::require_user_id(&session).await?;
+    let order_id = id
+        .parse::<uuid::Uuid>()
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    let row = crate::orders::get_for_user(&state.pool, user_id, order_id)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .ok_or_else(|| ServerFnError::new("order not found"))?;
+    Ok(dto(row))
 }

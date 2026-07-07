@@ -1,8 +1,10 @@
-#![allow(non_snake_case)]
-
 mod app;
+mod auth;
 mod server;
 use app::App;
+
+#[cfg(feature = "server")]
+mod jobs;
 
 #[cfg(feature = "server")]
 mod orders;
@@ -11,18 +13,36 @@ mod orders;
 mod state;
 
 #[cfg(feature = "server")]
-mod workflow;
+mod users;
 
 fn main() {
-    // Client (wasm) entrypoint.
+    // Client entrypoint.
     #[cfg(not(feature = "server"))]
     dioxus::launch(App);
 
-    // Server entrypoint: load env, boot the embedded duroxide runtime + Client,
-    // then serve the Dioxus app (which also registers the #[server] functions).
+    // Server entrypoint: connect Postgres, run migrations, spawn the embedded
+    // graphile_worker worker, and serve the app with session + state layers.
     #[cfg(feature = "server")]
     dioxus::serve(|| async {
-        let state = state::AppState::new().await;
-        Ok(dioxus::server::router(App).layer(axum::Extension(state)))
+        let (state, worker) = state::AppState::new().await;
+        tokio::spawn(async move {
+            if let Err(e) = worker.run().await {
+                eprintln!("graphile_worker exited: {e}");
+            }
+        });
+
+        let session_store = tower_sessions_sqlx_store::PostgresStore::new(state.pool.clone());
+        session_store
+            .migrate()
+            .await
+            .expect("failed to migrate session store");
+        // `with_secure(false)` so the cookie works over plain http in dev;
+        // set it to true behind TLS in production.
+        let session_layer = tower_sessions::SessionManagerLayer::new(session_store)
+            .with_secure(false);
+
+        Ok(dioxus::server::router(App)
+            .layer(session_layer)
+            .layer(axum::Extension(state)))
     });
 }

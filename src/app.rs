@@ -1,10 +1,10 @@
 #![allow(non_snake_case)]
-//! The single-page UI: create an order, watch the durable workflow's stage via
-//! polling, and Approve/Reject an order that is awaiting a human decision.
+//! Interim single-page UI (Task 2 replaces this with a routed multi-page app):
+//! create an order and watch the job pipeline's status via polling.
 
 use dioxus::prelude::*;
 
-use crate::server::{list_orders, start_order, submit_decision, OrderInput, OrderStatusDto};
+use crate::server::{list_orders, start_order, OrderDto, OrderInput};
 
 /// Interval sleep for the polling loop. The loop only ever runs on the wasm
 /// client (`use_future` does not run during native SSR); the non-wasm arm just
@@ -19,10 +19,9 @@ async fn sleep_ms(_ms: u32) {
 pub fn App() -> Element {
     let mut item = use_signal(|| "Widget".to_string());
     let mut amount = use_signal(|| "10".to_string());
-    let mut orders = use_signal(Vec::<OrderStatusDto>::new);
+    let mut orders = use_signal(Vec::<OrderDto>::new);
     let mut error = use_signal(|| Option::<String>::None);
 
-    // Poll the order list roughly every 1.5s so status transitions show live.
     use_future(move || async move {
         loop {
             match list_orders().await {
@@ -50,7 +49,7 @@ pub fn App() -> Element {
         style { {CSS} }
         main { class: "wrap",
             h1 { "Duroxus" }
-            p { class: "sub", "Dioxus server functions driving a durable duroxide order-approval workflow." }
+            p { class: "sub", "Dioxus server functions driving a graphile_worker order pipeline." }
 
             section { class: "card",
                 h2 { "New order" }
@@ -81,11 +80,16 @@ pub fn App() -> Element {
                 } else {
                     table {
                         thead {
-                            tr { th { "Item" } th { "Amount" } th { "Instance" } th { "Stage" } th { "Action" } }
+                            tr { th { "Item" } th { "Amount" } th { "Id" } th { "Status" } }
                         }
                         tbody {
                             for o in orders() {
-                                OrderRow { key: "{o.instance_id}", order: o.clone() }
+                                tr { key: "{o.id}",
+                                    td { "{o.item}" }
+                                    td { "{o.amount}" }
+                                    td { class: "mono", "{o.id}" }
+                                    td { span { class: status_class(&o.status), "{o.status}" } }
+                                }
                             }
                         }
                     }
@@ -95,59 +99,16 @@ pub fn App() -> Element {
     }
 }
 
-#[component]
-fn OrderRow(order: OrderStatusDto) -> Element {
-    let approve_id = order.instance_id.clone();
-    let reject_id = order.instance_id.clone();
-    rsx! {
-        tr {
-            td { "{order.item}" }
-            td { "{order.amount}" }
-            td { class: "mono", "{order.instance_id}" }
-            td {
-                span { class: stage_class(&order.stage), "{order.stage}" }
-            }
-            td {
-                if order.actionable {
-                    button {
-                        class: "approve",
-                        onclick: move |_| {
-                            let id = approve_id.clone();
-                            async move { let _ = submit_decision(id, true).await; }
-                        },
-                        "Approve"
-                    }
-                    button {
-                        class: "reject",
-                        onclick: move |_| {
-                            let id = reject_id.clone();
-                            async move { let _ = submit_decision(id, false).await; }
-                        },
-                        "Reject"
-                    }
-                } else {
-                    span { class: "muted", "—" }
-                }
-            }
-        }
+pub fn status_class(status: &str) -> &'static str {
+    match status {
+        "fulfilled" => "pill ok",
+        "failed" => "pill err",
+        "queued" => "pill",
+        _ => "pill wait", // validating / charging / fulfilling
     }
 }
 
-fn stage_class(stage: &str) -> &'static str {
-    if stage.starts_with("Fulfilled") {
-        "pill ok"
-    } else if stage.starts_with("Refunded") {
-        "pill warn"
-    } else if stage.starts_with("Failed") {
-        "pill err"
-    } else if stage.starts_with("Awaiting") {
-        "pill wait"
-    } else {
-        "pill"
-    }
-}
-
-const CSS: &str = r#"
+pub const CSS: &str = r#"
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
 body { margin: 0; }
@@ -159,14 +120,15 @@ h1 { margin: 0; font-size: 1.9rem; letter-spacing: -0.02em; }
   border-radius: 12px; padding: 1.1rem 1.25rem; margin-bottom: 1.25rem; }
 .card h2 { margin: 0 0 .8rem; font-size: 1.05rem; }
 .row { display: flex; gap: .6rem; flex-wrap: wrap; }
+.col { display: flex; flex-direction: column; gap: .6rem; }
 input { flex: 1 1 140px; padding: .55rem .7rem; border-radius: 8px;
   border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
   background: transparent; color: inherit; }
 button { padding: .55rem .9rem; border-radius: 8px; border: 0; cursor: pointer;
   font-weight: 600; }
 .primary { background: #4f46e5; color: #fff; }
-.approve { background: #16a34a; color: #fff; margin-right: .4rem; }
-.reject { background: #dc2626; color: #fff; }
+.ghost { background: transparent; border: 1px solid
+  color-mix(in srgb, currentColor 25%, transparent); color: inherit; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: .55rem .5rem; border-bottom:
   1px solid color-mix(in srgb, currentColor 12%, transparent); vertical-align: middle; }
@@ -178,7 +140,11 @@ th { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; opacit
   font-size: .8rem; font-weight: 600;
   background: color-mix(in srgb, currentColor 12%, transparent); }
 .pill.ok { background: #16a34a22; color: #16a34a; }
-.pill.warn { background: #d9770622; color: #d97706; }
 .pill.err { background: #dc262622; color: #dc2626; }
 .pill.wait { background: #4f46e522; color: #6366f1; }
+.nav { display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 1.25rem; gap: .75rem; }
+.nav .who { opacity: .7; font-size: .9rem; }
+.narrow { max-width: 420px; }
+a { color: #6366f1; }
 "#;

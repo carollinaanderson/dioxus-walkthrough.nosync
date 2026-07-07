@@ -1,14 +1,17 @@
-//! Server-only Postgres store for order business-data. Reuses duroxide-pg's
-//! `PgPool` (see docs/API-NOTES.md). Schema is applied via the sqlx migration
-//! in `migrations/`.
+//! Server-only Postgres store for order business-data. Schema is applied via
+//! the sqlx migrations in `migrations/`. Orders belong to a user and carry a
+//! `status` driven by the graphile_worker job pipeline in `jobs.rs`.
 
 use sqlx::{migrate::MigrateError, prelude::FromRow, PgPool};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct OrderRow {
-    pub instance_id: String,
+    pub id: Uuid,
+    pub user_id: Uuid,
     pub item: String,
     pub amount: i64,
+    pub status: String,
 }
 
 /// Apply pending sqlx migrations against the (shared) pool.
@@ -18,38 +21,50 @@ pub async fn init(pool: &PgPool) -> Result<(), MigrateError> {
 
 pub async fn insert(
     pool: &PgPool,
-    instance_id: &str,
+    user_id: Uuid,
     item: &str,
     amount: u32,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO orders (instance_id, item, amount) VALUES ($1, $2, $3)")
-        .bind(instance_id)
-        .bind(item)
-        .bind(amount as i64)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-pub async fn list(pool: &PgPool) -> Result<Vec<OrderRow>, sqlx::Error> {
+) -> Result<OrderRow, sqlx::Error> {
     sqlx::query_as::<_, OrderRow>(
-        "SELECT instance_id, item, amount FROM orders ORDER BY created_at DESC",
+        "INSERT INTO orders (user_id, item, amount) VALUES ($1, $2, $3)
+         RETURNING id, user_id, item, amount, status",
     )
-    .fetch_all(pool)
-    .await
-}
-
-pub async fn get(pool: &PgPool, instance_id: &str) -> Result<OrderRow, sqlx::Error> {
-    sqlx::query_as::<_, OrderRow>(
-        "SELECT instance_id, item, amount FROM orders WHERE instance_id = $1",
-    )
-    .bind(instance_id)
+    .bind(user_id)
+    .bind(item)
+    .bind(amount as i64)
     .fetch_one(pool)
     .await
 }
 
-// The orders store is exercised end-to-end (insert/get/list) against real
-// Postgres by `workflow::tests::postgres_order_lifecycle`, which owns the single
-// runtime + pool. It is not tested standalone here because a sqlx pool is bound
-// to the tokio runtime that created it and cannot be shared across separate
-// `#[tokio::test]` functions.
+pub async fn list_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<OrderRow>, sqlx::Error> {
+    sqlx::query_as::<_, OrderRow>(
+        "SELECT id, user_id, item, amount, status FROM orders
+         WHERE user_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn get_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<Option<OrderRow>, sqlx::Error> {
+    sqlx::query_as::<_, OrderRow>(
+        "SELECT id, user_id, item, amount, status FROM orders WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn set_status(pool: &PgPool, id: Uuid, status: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE orders SET status = $2 WHERE id = $1")
+        .bind(id)
+        .bind(status)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
