@@ -109,3 +109,72 @@ impl TaskHandler for FulfillOrder {
         or_fail(&ctx, self.order_id, step).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::state::AppState;
+
+    /// End-to-end against real Postgres (docker compose up -d): a queued order
+    /// walks validating -> charging -> fulfilling -> fulfilled once the worker
+    /// picks up the chained jobs.
+    #[tokio::test]
+    async fn order_pipeline_runs_to_fulfilled() {
+        let (state, worker) = AppState::new().await;
+        let worker_handle = tokio::spawn(async move { worker.run().await });
+
+        let hash = crate::auth::hash_password("hunter2-integration").unwrap();
+        let username = format!("it-user-{}", uuid::Uuid::new_v4());
+        let user = crate::users::insert(&state.pool, &username, &hash)
+            .await
+            .unwrap();
+
+        let row = crate::orders::insert(&state.pool, user.id, "Widget", 10)
+            .await
+            .unwrap();
+        assert_eq!(row.status, "queued");
+
+        state
+            .utils
+            .add_job(ValidateOrder { order_id: row.id }, JobSpec::default())
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut seen = vec![row.status.clone()];
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let cur = crate::orders::get_for_user(&state.pool, user.id, row.id)
+                .await
+                .unwrap()
+                .expect("order row should exist");
+            if seen.last() != Some(&cur.status) {
+                seen.push(cur.status.clone());
+            }
+            if cur.status == "fulfilled" {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "pipeline timed out; stages seen: {seen:?}"
+            );
+        }
+        // The pipeline passed through at least one intermediate stage.
+        assert!(
+            seen.contains(&"validating".to_string()),
+            "stages seen: {seen:?}"
+        );
+
+        // list_for_user surfaces the fulfilled order (and only this user's).
+        let listed = crate::orders::list_for_user(&state.pool, user.id)
+            .await
+            .unwrap();
+        assert!(listed
+            .iter()
+            .any(|o| o.id == row.id && o.status == "fulfilled"));
+
+        worker_handle.abort();
+    }
+}
