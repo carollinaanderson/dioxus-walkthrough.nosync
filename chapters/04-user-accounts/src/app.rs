@@ -9,11 +9,11 @@ use crate::auth::{login, register};
 use crate::server::{list_orders, start_order, OrderDto, OrderInput};
 
 pub fn App() -> Element {
-    let mut reg_username = use_signal(String::new);
+    let mut reg_email = use_signal(String::new);
     let mut reg_password = use_signal(String::new);
     let mut reg_result = use_signal(|| Option::<String>::None);
 
-    let mut login_username = use_signal(String::new);
+    let mut login_email = use_signal(String::new);
     let mut login_password = use_signal(String::new);
     let mut login_result = use_signal(|| Option::<String>::None);
 
@@ -23,21 +23,17 @@ pub fn App() -> Element {
     let mut order_error = use_signal(|| Option::<String>::None);
 
     let do_register = move |_| async move {
-        match register(reg_username(), reg_password()).await {
-            Ok(user) => reg_result.set(Some(format!(
-                "registered as {} ({})",
-                user.username, user.id
-            ))),
+        match register(reg_email(), reg_password()).await {
+            Ok(user) => reg_result.set(Some(format!("registered as {} ({})", user.email, user.id))),
             Err(e) => reg_result.set(Some(format!("error: {e}"))),
         }
     };
 
     let do_login = move |_| async move {
-        match login(login_username(), login_password()).await {
-            Ok(user) => login_result.set(Some(format!(
-                "logged in as {} ({})",
-                user.username, user.id
-            ))),
+        match login(login_email(), login_password()).await {
+            Ok(user) => {
+                login_result.set(Some(format!("logged in as {} ({})", user.email, user.id)))
+            }
             Err(e) => login_result.set(Some(format!("error: {e}"))),
         }
     };
@@ -80,16 +76,16 @@ pub fn App() -> Element {
         style { {CSS} }
         main { class: "wrap",
             h1 { "MyApp" }
-            p { class: "sub", "Chapter 4: user accounts (no sessions yet)." }
+            p { class: "sub", "Chapter 4: user accounts via better-auth.rs." }
 
             div { class: "row",
                 section { class: "card narrow",
                     h2 { "Register" }
                     div { class: "col",
                         input {
-                            value: "{reg_username}",
-                            oninput: move |e| reg_username.set(e.value()),
-                            placeholder: "Username",
+                            value: "{reg_email}",
+                            oninput: move |e| reg_email.set(e.value()),
+                            placeholder: "Email",
                         }
                         input {
                             r#type: "password",
@@ -108,9 +104,9 @@ pub fn App() -> Element {
                     h2 { "Login" }
                     div { class: "col",
                         input {
-                            value: "{login_username}",
-                            oninput: move |e| login_username.set(e.value()),
-                            placeholder: "Username",
+                            value: "{login_email}",
+                            oninput: move |e| login_email.set(e.value()),
+                            placeholder: "Email",
                         }
                         input {
                             r#type: "password",

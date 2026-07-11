@@ -29,18 +29,18 @@ fn dto(row: crate::orders::OrderRow) -> OrderDto {
     }
 }
 
-#[post("/api/orders/start", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+#[post("/api/orders/start", state: axum::Extension<crate::state::AppState>)]
 pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
-    crate::auth::require_user_id(&session).await?;
+    crate::auth::require_user_id(&state).await?;
     let row = crate::orders::insert(&state.pool, &order.item, order.amount)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(row.id.to_string())
 }
 
-#[get("/api/orders/list", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+#[get("/api/orders/list", state: axum::Extension<crate::state::AppState>)]
 pub async fn list_orders() -> ServerFnResult<Vec<OrderDto>> {
-    crate::auth::require_user_id(&session).await?;
+    crate::auth::require_user_id(&state).await?;
     let rows = crate::orders::list(&state.pool)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;

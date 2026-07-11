@@ -29,10 +29,10 @@ fn dto(row: crate::orders::OrderRow) -> OrderDto {
     }
 }
 
-#[post("/api/orders/start", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+#[post("/api/orders/start", state: axum::Extension<crate::state::AppState>)]
 pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
-    let user_id = crate::auth::require_user_id(&session).await?;
-    let row = crate::orders::insert(&state.pool, user_id, &order.item, order.amount)
+    let user_id = crate::auth::require_user_id(&state).await?;
+    let row = crate::orders::insert(&state.pool, &user_id, &order.item, order.amount)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     state
@@ -46,22 +46,22 @@ pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
     Ok(row.id.to_string())
 }
 
-#[get("/api/orders/list", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+#[get("/api/orders/list", state: axum::Extension<crate::state::AppState>)]
 pub async fn list_orders() -> ServerFnResult<Vec<OrderDto>> {
-    let user_id = crate::auth::require_user_id(&session).await?;
-    let rows = crate::orders::list_for_user(&state.pool, user_id)
+    let user_id = crate::auth::require_user_id(&state).await?;
+    let rows = crate::orders::list_for_user(&state.pool, &user_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
     Ok(rows.into_iter().map(dto).collect())
 }
 
-#[get("/api/orders/{id}", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+#[get("/api/orders/{id}", state: axum::Extension<crate::state::AppState>)]
 pub async fn get_order(id: String) -> ServerFnResult<OrderDto> {
-    let user_id = crate::auth::require_user_id(&session).await?;
+    let user_id = crate::auth::require_user_id(&state).await?;
     let order_id = id
         .parse::<uuid::Uuid>()
         .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let row = crate::orders::get_for_user(&state.pool, user_id, order_id)
+    let row = crate::orders::get_for_user(&state.pool, &user_id, order_id)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?
         .ok_or_else(|| ServerFnError::new("order not found"))?;

@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-//! Register page: username/password -> `auth::register` (auto-login) ->
+//! Register page: email/password -> `auth::register` (auto-login) ->
 //! navigate to orders.
 
 use dioxus::prelude::*;
@@ -9,13 +9,13 @@ use crate::auth::register;
 
 #[component]
 pub fn RegisterPage() -> Element {
-    let mut username = use_signal(String::new);
+    let mut email = use_signal(String::new);
     let mut password = use_signal(String::new);
     let mut error = use_signal(|| Option::<String>::None);
     let nav = use_navigator();
 
     let submit = move |_| async move {
-        match register(username(), password()).await {
+        match register(email(), password()).await {
             Ok(_) => {
                 nav.push(Route::OrdersPage {});
             }
@@ -30,9 +30,9 @@ pub fn RegisterPage() -> Element {
             section { class: "card",
                 div { class: "col",
                     input {
-                        value: "{username}",
-                        oninput: move |e| username.set(e.value()),
-                        placeholder: "Username",
+                        value: "{email}",
+                        oninput: move |e| email.set(e.value()),
+                        placeholder: "Email",
                     }
                     input {
                         r#type: "password",

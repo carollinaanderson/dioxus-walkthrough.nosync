@@ -26,8 +26,9 @@ its own orders now.
   adding a `NOT NULL` column in one step fails (existing rows have no value
   to put there) — you add it nullable, backfill, *then* tighten it. Our
   table happens to be empty, but the migration is written the way you'd
-  write it against a live database.
-- **`src/orders.rs`**: every function now takes a `user_id: Uuid` and puts
+  write it against a live database. The column type is `TEXT`, not `UUID`
+  — better-auth.rs's user ids are strings, not the `uuid` crate's `Uuid`.
+- **`src/orders.rs`**: every function now takes a `user_id: &str` and puts
   it in the query — `insert` writes it, `list_for_user`/`get_for_user` add
   `WHERE user_id = $1`. There is no code path that returns another user's
   order, because the SQL itself won't produce one.
@@ -57,8 +58,9 @@ background pipeline: `graphile_worker` chains three jobs
 2. **Add `graphile_worker`** as a server-only dependency:
 
    ```toml
-   # =0.13.1: last version on sqlx 0.8; later versions moved to sqlx 0.9,
-   # which tower-sessions-sqlx-store (sqlx 0.8) can't share a pool with.
+   # =0.13.1: last version on sqlx 0.8; later versions moved to sqlx 0.9.
+   # better-auth.rs's SqlxAdapter shares one PgPool with graphile_worker
+   # here, so both must agree on sqlx's major version.
    graphile_worker = { version = "=0.13.1", optional = true }
    ```
 
@@ -244,6 +246,9 @@ Watch an order you create walk `queued → validating → charging → fulfillin
 
 [chapters/07-background-jobs](../07-background-jobs) has the full working
 version — the same app documented in the root README, including an e2e test
-that runs the pipeline against real Postgres.
+that runs the pipeline against real Postgres. That test creates its test
+user through `auth.rs`'s `register` function rather than touching
+`users.rs` directly — there's no `users.rs` left to touch; better-auth.rs
+owns that table.
 
 **Next:** [Chapter 7 — Background jobs](../07-background-jobs/README.md)

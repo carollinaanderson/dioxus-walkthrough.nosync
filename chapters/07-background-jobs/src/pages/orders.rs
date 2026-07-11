@@ -87,7 +87,7 @@ pub fn OrdersPage() -> Element {
                 }
                 div { class: "row",
                     if let Some(u) = user() {
-                        span { class: "who", "Signed in as {u.username}" }
+                        span { class: "who", "Signed in as {u.email}" }
                     }
                     button { class: "ghost", onclick: sign_out, "Sign out" }
                 }

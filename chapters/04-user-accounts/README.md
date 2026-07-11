@@ -2,11 +2,14 @@
 
 ## What you'll learn
 
-A `users` table, and the two functions every app with accounts needs:
-`register` and `login`. You'll hash passwords with
-[`argon2`](https://docs.rs/argon2) so plaintext passwords never touch the
-database — and you'll see *why* you need sessions (chapter 5) by feeling
-their absence.
+How to wire up [better-auth.rs](https://better-auth.rs) — a real
+authentication library — instead of hand-rolling password hashing and
+sessions yourself: its plugin model (`EmailPasswordPlugin` +
+`SessionManagementPlugin`), its own Postgres-backed tables, and a
+`register`/`login` pair of `#[server]` fns that call into it. Unlike a
+from-scratch implementation, sessions are already fully working by the end
+of this chapter — that's inherent to using the library, not a separate
+lesson (chapter 5 is about *using* that session, not building it).
 
 ## Run it
 
@@ -16,37 +19,51 @@ cp .env.example .env
 dx serve
 ```
 
-Register a user, then reload the page. Notice the "registered as ..."
-message is gone, and there's no way to tell the app who you are anymore.
-That's expected — nothing persists identity across requests yet. Orders are
-still unscoped from chapter 3.
+Register a user with an email and password. Reload the page — the
+"registered as ..." message disappears (nothing in `app.rs` remembers it
+across a reload yet), but if you check your browser's cookies for
+`localhost:8080`, you'll see a session cookie already sitting there. That's
+the difference from a hand-rolled version: the session exists from the very
+first successful register/login call, whether or not the UI does anything
+with it. Orders are still unscoped from chapter 3.
 
 ## How it works
 
-- **`migrations/0002_create_users.sql`** adds a `users` table:
-  `username` is `UNIQUE` (the database enforces no duplicates even under a
-  race), and `password_hash` stores an argon2 hash, never the raw password.
-- **`src/auth.rs`**'s `hash_password` generates a random salt and hashes
-  with `Argon2::default().hash_password(...)`. The salt is embedded in the
-  returned string, so `verify_password` can re-derive it from `PasswordHash::new(hash)`.
-  Hashing the same password twice gives different output (see the test) —
-  that's the salt doing its job, and it's why you can't just compare hashes
-  with `==`.
-- **`register`** checks the username isn't taken, hashes the password, and
-  inserts a row. **`login`** looks up the user and calls `verify_password`.
-  Both return the *same* generic "invalid username or password" error for
-  "no such user" and "wrong password" — if they differed, an attacker could
-  use the error message to enumerate valid usernames.
-- Neither function touches a session or a cookie. They're pure request/response
-  — call them, get a result, nothing is remembered.
+- **`migrations/0002_better_auth.sql`** creates better-auth.rs's own
+  `users`, `sessions`, `accounts`, and `verifications` tables — its
+  documented schema. Notice ids are `TEXT`, not `UUID`: that's a
+  better-auth.rs convention, not a choice we made.
+- **`src/state.rs`** builds one `BetterAuth<SqlxAdapter>` per process,
+  sharing the same `PgPool` your own migrations already ran against
+  (`SqlxAdapter::from_pool(pool.clone())`). `AuthConfig::new(secret)`
+  requires a 32+ character secret — read from the new `BETTER_AUTH_SECRET`
+  env var. Two plugins compose the behavior: `EmailPasswordPlugin` (with
+  signup enabled and an 8-character password minimum) does the actual
+  hashing and credential checks; `SessionManagementPlugin` issues and
+  validates the session token/cookie.
+- **`src/auth.rs`** doesn't call better-auth's own Axum router (which
+  would mean the frontend calling `/auth/sign-up/email` etc. directly via
+  `fetch`). Instead it keeps this tutorial's `#[server]` fn pattern:
+  `register`/`login` build a JSON body and call
+  `auth.handle_request(AuthRequest::from_parts(method, path, headers, body,
+  query))` — the same programmatic entry point better-auth's own HTTP
+  router uses internally — for `/sign-up/email` / `/sign-in/email`. The
+  response carries a `Set-Cookie` header, which gets forwarded to the
+  browser via `FullstackContext::current().add_response_header(...)`; the
+  browser then sends that cookie back on every subsequent request, which
+  `auth.rs` reads (`FullstackContext::extract::<axum::http::HeaderMap,
+  _>()`) and forwards *into* `handle_request` so better-auth can find the
+  session again.
+- **`register`/`login` both return the same shape**, `CurrentUser { id,
+  email }`, parsed out of better-auth's JSON response body — there's no
+  local `users` table query left in this codebase at all.
 
 ## Your turn: get to chapter 5
 
-Chapter 5 adds real sessions: a cookie-backed identity that persists across
-requests, a login/register/orders **router** (multiple pages), and a
-protected page that redirects you to `/login` if you're not signed in. This
-is a meaty chapter — the reference code is the fastest way to unblock
-yourself if something doesn't click.
+Chapter 5 doesn't add anything new to *how* sessions work — that's already
+done. It's about *using* the session that's already there: a multi-page
+router, a protected orders page that redirects to `/login` when signed out,
+and a `require_user_id` guard reused by every protected server fn.
 
 1. **Copy this chapter as your working copy:**
 
@@ -55,133 +72,14 @@ yourself if something doesn't click.
    cd ../my-05-sessions
    ```
 
-2. **Add `tower-sessions` and a Postgres-backed session store**, plus
-   Dioxus's `router` feature:
+2. **Add the Dioxus `router` feature** to `Cargo.toml`:
 
    ```toml
    dioxus = { version = "0.7", features = ["fullstack", "router"] }
-
-   tower-sessions = { version = "0.14", optional = true }
-   tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"], optional = true }
    ```
 
-   Add `"dep:tower-sessions"` and `"dep:tower-sessions-sqlx-store"` to the
-   `server` feature list. `tower-sessions` gives you a `Session` you can
-   read/write from a request; `tower-sessions-sqlx-store` is the piece that
-   persists that session's data in Postgres (in its own table) instead of,
-   say, only in an in-memory map that would forget everyone on restart.
-
-3. **Layer the session middleware in `main.rs`.** This has to happen
-   *after* you have a `PgPool` to give it, so it lives inside the
-   `dioxus::serve` closure:
-
-   ```rust
-   #[cfg(feature = "server")]
-   dioxus::serve(|| async {
-       let state = state::AppState::new().await;
-
-       let session_store = tower_sessions_sqlx_store::PostgresStore::new(state.pool.clone());
-       session_store
-           .migrate()
-           .await
-           .expect("failed to migrate session store");
-       // `with_secure(false)` so the cookie works over plain http in dev;
-       // set it to true behind TLS in production.
-       let session_layer =
-           tower_sessions::SessionManagerLayer::new(session_store).with_secure(false);
-
-       Ok(dioxus::server::router(App)
-           .layer(session_layer)
-           .layer(axum::Extension(state)))
-   });
-   ```
-
-   `PostgresStore::new` doesn't touch the database yet — `.migrate().await`
-   is the call that actually creates its session table, separately from
-   your own `sqlx::migrate!` migrations. `SessionManagerLayer` is what
-   attaches a `Session` to every incoming request (creating a new one and
-   setting the cookie on first visit) and saves it back to the store after
-   the response is built. `.layer()` calls stack — this one sits alongside
-   the `axum::Extension(state)` layer you already had, and axum runs them
-   in order.
-
-4. **Give `register` and `login` a session, and remember the user.** Add a
-   `session: tower_sessions::Session` extractor argument (same mechanism as
-   the `state:` extractor from chapter 3) and insert the user's id after
-   success:
-
-   ```rust
-   #[cfg(feature = "server")]
-   pub const SESSION_USER_KEY: &str = "user_id";
-
-   #[post("/api/auth/register", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
-   pub async fn register(username: String, password: String) -> ServerFnResult<CurrentUser> {
-       // ...same validation and insert as chapter 4...
-       session
-           .insert(SESSION_USER_KEY, user.id)
-           .await
-           .map_err(|e| ServerFnError::new(e.to_string()))?;
-       Ok(CurrentUser { id: user.id.to_string(), username: user.username })
-   }
-   ```
-
-   Do the same in `login`. `session.insert(key, value)` serializes `value`
-   (here, a `uuid::Uuid`) into the session's storage under that string key —
-   that's the entire mechanism. Add `logout` and `current_user` too:
-
-   ```rust
-   #[post("/api/auth/logout", session: tower_sessions::Session)]
-   pub async fn logout() -> ServerFnResult<()> {
-       session.flush().await.map_err(|e| ServerFnError::new(e.to_string()))?;
-       Ok(())
-   }
-
-   #[get("/api/auth/me", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
-   pub async fn current_user() -> ServerFnResult<Option<CurrentUser>> {
-       let Ok(Some(user_id)) = session.get::<uuid::Uuid>(SESSION_USER_KEY).await else {
-           return Ok(None);
-       };
-       let user = crate::users::find_by_id(&state.pool, user_id)
-           .await
-           .map_err(|e| ServerFnError::new(e.to_string()))?;
-       Ok(user.map(|u| CurrentUser { id: u.id.to_string(), username: u.username }))
-   }
-   ```
-
-   `session.flush()` deletes the session's data entirely — that's what
-   "signing out" means here, there's no separate "logged out" flag to set.
-   `current_user`'s `let ... else { return Ok(None) }` collapses "no
-   cookie", "cookie but no `user_id` key", and "store lookup failed" into
-   one outcome: not logged in. That's a deliberate choice — an expired or
-   corrupt session should look like "logged out" to the caller, not like a
-   server error.
-
-5. **Write a `require_user_id` helper** — the one place every protected
-   server fn checks auth:
-
-   ```rust
-   pub const UNAUTHENTICATED: &str = "unauthenticated";
-
-   #[cfg(feature = "server")]
-   pub async fn require_user_id(session: &tower_sessions::Session) -> Result<uuid::Uuid, ServerFnError> {
-       session
-           .get::<uuid::Uuid>(SESSION_USER_KEY)
-           .await
-           .ok()
-           .flatten()
-           .ok_or_else(|| ServerFnError::new(UNAUTHENTICATED))
-   }
-   ```
-
-   Then in `server.rs`, add a `session:` argument to `start_order` and
-   `list_orders` and call `crate::auth::require_user_id(&session).await?;`
-   as their first line — for now just to gate access, without yet using the
-   returned id for anything (that's chapter 6). The `UNAUTHENTICATED`
-   constant is public and reused verbatim in the UI in the next step — the
-   client checks for this exact string to know when to redirect.
-
-6. **Split `App` into a router.** Move each existing form into its own file
-   under `src/pages/` (`pages/login.rs`, `pages/register.rs`,
+3. **Split `App` into a router.** Move each existing form into its own
+   file under `src/pages/` (`pages/login.rs`, `pages/register.rs`,
    `pages/orders.rs`), then in `app.rs`:
 
    ```rust
@@ -214,7 +112,7 @@ yourself if something doesn't click.
    `RegisterPage`, `OrdersPage`) is just a normal `#[component]` fn — the
    router's only job is picking which one to mount.
 
-7. **Protect the orders page.** In `pages/orders.rs`, on mount, call
+4. **Protect the orders page.** In `pages/orders.rs`, on mount, call
    `current_user()`; if it comes back `None`, navigate away:
 
    ```rust
@@ -232,17 +130,25 @@ yourself if something doesn't click.
    (as opposed to `Link { to: ... }`, which renders a clickable link).
    `use_future` runs its async block once when the component first mounts —
    perfect for an on-load check like this. Do the same check wherever a
-   server call might fail with `UNAUTHENTICATED` (e.g. `list_orders`) so a
+   server call might fail with `UNAUTHENTICATED` (e.g. `list_orders`), so a
    session that expires mid-visit also redirects, not just a cold load.
 
    This client-side check is only ever a UX nicety, though — the real
-   enforcement is `require_user_id` on the server from step 5. If you
-   deleted this whole `use_future` block, unauthenticated visitors would
-   see an empty/broken page instead of being redirected, but they still
-   couldn't fetch anyone's data.
+   enforcement is `require_user_id` (already in `auth.rs`) on the server.
+   If you deleted this whole `use_future` block, unauthenticated visitors
+   would see an empty/broken page instead of being redirected, but they
+   still couldn't fetch anyone's data.
+
+5. **Gate the orders server fns.** In `server.rs`, call
+   `crate::auth::require_user_id(&state).await?;` as the first line of
+   `start_order` and `list_orders` — for now just to gate access, without
+   using the returned id for anything yet (that's chapter 6). The
+   `UNAUTHENTICATED` constant is public and reused verbatim in the UI in
+   the previous step — the client checks for this exact string to know
+   when to redirect.
 
 ## Check your work
 
-[chapters/05-sessions](../05-sessions) has the full working version.
+[chapters/05-sessions](../05-sessions) has the full version.
 
 **Next:** [Chapter 5 — Sessions](../05-sessions/README.md)

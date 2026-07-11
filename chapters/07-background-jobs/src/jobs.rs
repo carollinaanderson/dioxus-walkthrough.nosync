@@ -112,7 +112,10 @@ impl TaskHandler for FulfillOrder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
+
+    use better_auth::types::{AuthRequest, HttpMethod};
 
     use super::*;
     use crate::state::AppState;
@@ -124,13 +127,30 @@ mod tests {
     async fn order_pipeline_runs_to_fulfilled() {
         let (state, worker_handle) = AppState::new().await;
 
-        let hash = crate::auth::hash_password("hunter2-integration").unwrap();
-        let username = format!("it-user-{}", uuid::Uuid::new_v4());
-        let user = crate::users::insert(&state.pool, &username, &hash)
+        let email = format!("it-user-{}@example.com", uuid::Uuid::new_v4());
+        let body = serde_json::json!({
+            "email": email,
+            "password": "hunter2-integration",
+            "name": email,
+        });
+        let response = state
+            .auth
+            .handle_request(AuthRequest::from_parts(
+                HttpMethod::Post,
+                "/sign-up/email".to_string(),
+                HashMap::from([("content-type".to_string(), "application/json".to_string())]),
+                Some(serde_json::to_vec(&body).unwrap()),
+                HashMap::new(),
+            ))
             .await
-            .unwrap();
+            .expect("sign-up should succeed");
+        let signed_up: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        let user_id = signed_up["user"]["id"]
+            .as_str()
+            .expect("sign-up response should include user.id")
+            .to_string();
 
-        let row = crate::orders::insert(&state.pool, user.id, "Widget", 10)
+        let row = crate::orders::insert(&state.pool, &user_id, "Widget", 10)
             .await
             .unwrap();
         assert_eq!(row.status, "queued");
@@ -145,7 +165,7 @@ mod tests {
         let mut seen = vec![row.status.clone()];
         loop {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let cur = crate::orders::get_for_user(&state.pool, user.id, row.id)
+            let cur = crate::orders::get_for_user(&state.pool, &user_id, row.id)
                 .await
                 .unwrap()
                 .expect("order row should exist");
@@ -167,7 +187,7 @@ mod tests {
         );
 
         // list_for_user surfaces the fulfilled order (and only this user's).
-        let listed = crate::orders::list_for_user(&state.pool, user.id)
+        let listed = crate::orders::list_for_user(&state.pool, &user_id)
             .await
             .unwrap();
         assert!(listed

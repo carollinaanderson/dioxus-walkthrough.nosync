@@ -1,4 +1,12 @@
-//! Auth `#[server]` functions and session helpers — unchanged from chapter 5.
+//! Auth `#[server]` functions: register, login, logout, current_user.
+//! Password hashing and sessions are both handled by better-auth.rs
+//! (`AppState::auth`, built in `state.rs`) — this file only translates
+//! between Dioxus `#[server]` fns and better-auth's HTTP-shaped API
+//! (`auth.handle_request`), forwarding the session cookie in both
+//! directions.
+
+#[cfg(feature = "server")]
+use std::collections::HashMap;
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -6,129 +14,174 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct CurrentUser {
     pub id: String,
-    pub username: String,
+    pub email: String,
 }
 
-#[cfg(feature = "server")]
-pub const SESSION_USER_KEY: &str = "user_id";
-
+/// Error message for unauthenticated requests. The UI matches on this exact
+/// string to redirect to the login page — keep it in sync with
+/// `pages/orders.rs`.
 pub const UNAUTHENTICATED: &str = "unauthenticated";
 
 #[cfg(feature = "server")]
-pub async fn require_user_id(
-    session: &tower_sessions::Session,
-) -> Result<uuid::Uuid, ServerFnError> {
-    session
-        .get::<uuid::Uuid>(SESSION_USER_KEY)
+async fn incoming_cookie_header() -> Option<String> {
+    let headers: axum::http::HeaderMap =
+        dioxus::fullstack::FullstackContext::extract().await.ok()?;
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+#[cfg(feature = "server")]
+fn forward_set_cookie(response: &better_auth::types::AuthResponse) {
+    let Some(ctx) = dioxus::fullstack::FullstackContext::current() else {
+        return;
+    };
+    for (name, value) in response.headers.iter() {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            if let Ok(value) = axum::http::HeaderValue::from_str(value) {
+                ctx.add_response_header(axum::http::header::SET_COOKIE, value);
+            }
+        }
+    }
+}
+
+/// Call one of better-auth's routes (`/sign-up/email`, `/sign-in/email`,
+/// `/sign-out`, `/get-session`) and forward cookies both ways.
+#[cfg(feature = "server")]
+async fn call_auth(
+    state: &crate::state::AppState,
+    method: better_auth::types::HttpMethod,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<better_auth::types::AuthResponse, ServerFnError> {
+    let mut headers = HashMap::new();
+    if body.is_some() {
+        headers.insert("content-type".to_string(), "application/json".to_string());
+    }
+    if let Some(cookie) = incoming_cookie_header().await {
+        headers.insert("cookie".to_string(), cookie);
+    }
+    let body_bytes = body
+        .map(|b| serde_json::to_vec(&b))
+        .transpose()
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    let response = state
+        .auth
+        .handle_request(better_auth::types::AuthRequest::from_parts(
+            method,
+            path.to_string(),
+            headers,
+            body_bytes,
+            HashMap::new(),
+        ))
         .await
-        .ok()
-        .flatten()
-        .ok_or_else(|| ServerFnError::new(UNAUTHENTICATED))
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    forward_set_cookie(&response);
+    Ok(response)
 }
 
 #[cfg(feature = "server")]
-pub(crate) fn hash_password(password: &str) -> Result<String, String> {
-    use argon2::password_hash::{rand_core::OsRng, SaltString};
-    use argon2::{Argon2, PasswordHasher};
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| e.to_string())
+fn parse_user(response: &better_auth::types::AuthResponse) -> Result<CurrentUser, ServerFnError> {
+    let json: serde_json::Value =
+        serde_json::from_slice(&response.body).map_err(|e| ServerFnError::new(e.to_string()))?;
+    let user = json
+        .get("user")
+        .ok_or_else(|| ServerFnError::new("better-auth response missing user"))?;
+    Ok(CurrentUser {
+        id: user
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ServerFnError::new("better-auth user missing id"))?
+            .to_string(),
+        email: user
+            .get("email")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ServerFnError::new("better-auth user missing email"))?
+            .to_string(),
+    })
 }
 
-#[cfg(feature = "server")]
-fn verify_password(password: &str, hash: &str) -> bool {
-    use argon2::{Argon2, PasswordHash, PasswordVerifier};
-    PasswordHash::new(hash)
-        .map(|parsed| {
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed)
-                .is_ok()
-        })
-        .unwrap_or(false)
-}
-
-#[post("/api/auth/register", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
-pub async fn register(username: String, password: String) -> ServerFnResult<CurrentUser> {
-    let username = username.trim().to_string();
-    if username.is_empty() {
-        return Err(ServerFnError::new("username is required"));
+#[post("/api/auth/register", state: axum::Extension<crate::state::AppState>)]
+pub async fn register(email: String, password: String) -> ServerFnResult<CurrentUser> {
+    let email = email.trim().to_string();
+    if email.is_empty() {
+        return Err(ServerFnError::new("email is required"));
     }
     if password.len() < 8 {
         return Err(ServerFnError::new("password must be at least 8 characters"));
     }
-    if crate::users::find_by_username(&state.pool, &username)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?
-        .is_some()
-    {
-        return Err(ServerFnError::new("username already taken"));
-    }
-    let hash = hash_password(&password).map_err(ServerFnError::new)?;
-    let user = crate::users::insert(&state.pool, &username, &hash)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    session
-        .insert(SESSION_USER_KEY, user.id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(CurrentUser {
-        id: user.id.to_string(),
-        username: user.username,
-    })
+    let response = call_auth(
+        &state,
+        better_auth::types::HttpMethod::Post,
+        "/sign-up/email",
+        Some(serde_json::json!({
+            "email": email,
+            "password": password,
+            "name": email,
+        })),
+    )
+    .await?;
+    parse_user(&response)
 }
 
-#[post("/api/auth/login", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
-pub async fn login(username: String, password: String) -> ServerFnResult<CurrentUser> {
-    let user = crate::users::find_by_username(&state.pool, username.trim())
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    let user = user.ok_or_else(|| ServerFnError::new("invalid username or password"))?;
-    if !verify_password(&password, &user.password_hash) {
-        return Err(ServerFnError::new("invalid username or password"));
-    }
-    session
-        .insert(SESSION_USER_KEY, user.id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(CurrentUser {
-        id: user.id.to_string(),
-        username: user.username,
-    })
+#[post("/api/auth/login", state: axum::Extension<crate::state::AppState>)]
+pub async fn login(email: String, password: String) -> ServerFnResult<CurrentUser> {
+    let response = call_auth(
+        &state,
+        better_auth::types::HttpMethod::Post,
+        "/sign-in/email",
+        Some(serde_json::json!({ "email": email.trim(), "password": password })),
+    )
+    .await?;
+    parse_user(&response)
 }
 
-#[post("/api/auth/logout", session: tower_sessions::Session)]
+#[post("/api/auth/logout", state: axum::Extension<crate::state::AppState>)]
 pub async fn logout() -> ServerFnResult<()> {
-    session
-        .flush()
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+    call_auth(
+        &state,
+        better_auth::types::HttpMethod::Post,
+        "/sign-out",
+        None,
+    )
+    .await?;
     Ok(())
 }
 
-#[get("/api/auth/me", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+#[get("/api/auth/me", state: axum::Extension<crate::state::AppState>)]
 pub async fn current_user() -> ServerFnResult<Option<CurrentUser>> {
-    let Ok(Some(user_id)) = session.get::<uuid::Uuid>(SESSION_USER_KEY).await else {
+    let response = call_auth(
+        &state,
+        better_auth::types::HttpMethod::Get,
+        "/get-session",
+        None,
+    )
+    .await?;
+    if response.status == 401 || response.status == 404 {
         return Ok(None);
-    };
-    let user = crate::users::find_by_id(&state.pool, user_id)
-        .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
-    Ok(user.map(|u| CurrentUser {
-        id: u.id.to_string(),
-        username: u.username,
-    }))
+    }
+    Ok(parse_user(&response).ok())
 }
 
-#[cfg(all(test, feature = "server"))]
-mod tests {
-    #[test]
-    fn password_hash_round_trip() {
-        let hash = super::hash_password("hunter2").expect("hashing should work");
-        assert!(super::verify_password("hunter2", &hash));
-        assert!(!super::verify_password("wrong-password", &hash));
-        let hash2 = super::hash_password("hunter2").unwrap();
-        assert_ne!(hash, hash2);
+/// Extract the logged-in user's id from the session, or fail with
+/// [`UNAUTHENTICATED`]. This is the server-side auth boundary for every
+/// protected server fn — the client-side route guard is only UX.
+#[cfg(feature = "server")]
+pub async fn require_user_id(state: &crate::state::AppState) -> Result<String, ServerFnError> {
+    let response = call_auth(
+        state,
+        better_auth::types::HttpMethod::Get,
+        "/get-session",
+        None,
+    )
+    .await?;
+    if response.status != 200 {
+        return Err(ServerFnError::new(UNAUTHENTICATED));
     }
+    parse_user(&response)
+        .map(|u| u.id)
+        .map_err(|_| ServerFnError::new(UNAUTHENTICATED))
 }

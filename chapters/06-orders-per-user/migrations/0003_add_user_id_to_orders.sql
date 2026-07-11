@@ -1,5 +1,5 @@
 ALTER TABLE orders
-    ADD COLUMN user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+    ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
 
 -- This is a fresh tutorial database, so `orders` is empty here — no rows to
 -- backfill. In a real app with existing data you'd backfill user_id on

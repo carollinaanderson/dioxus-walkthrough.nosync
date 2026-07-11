@@ -7,7 +7,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, FromRow)]
 pub struct OrderRow {
     pub id: Uuid,
-    pub user_id: Uuid,
+    pub user_id: String,
     pub item: String,
     pub amount: i64,
     pub status: String,
@@ -15,7 +15,7 @@ pub struct OrderRow {
 
 pub async fn insert(
     pool: &PgPool,
-    user_id: Uuid,
+    user_id: &str,
     item: &str,
     amount: u32,
 ) -> Result<OrderRow, sqlx::Error> {
@@ -30,7 +30,7 @@ pub async fn insert(
     .await
 }
 
-pub async fn list_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<OrderRow>, sqlx::Error> {
+pub async fn list_for_user(pool: &PgPool, user_id: &str) -> Result<Vec<OrderRow>, sqlx::Error> {
     sqlx::query_as::<_, OrderRow>(
         "SELECT id, user_id, item, amount, status FROM orders
          WHERE user_id = $1 ORDER BY created_at DESC",
@@ -42,7 +42,7 @@ pub async fn list_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<OrderRow>
 
 pub async fn get_for_user(
     pool: &PgPool,
-    user_id: Uuid,
+    user_id: &str,
     id: Uuid,
 ) -> Result<Option<OrderRow>, sqlx::Error> {
     sqlx::query_as::<_, OrderRow>(

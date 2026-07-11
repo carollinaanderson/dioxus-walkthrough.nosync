@@ -53,11 +53,11 @@ no manual refresh.
 ### Version pinning note
 
 `graphile_worker` is pinned to `=0.13.1` (and its subcrates are pinned in
-`Cargo.lock`): later patches moved to sqlx 0.9, while
-`tower-sessions-sqlx-store` is still on sqlx 0.8 — with mismatched sqlx
-majors they can't share one `PgPool`. When the sessions store catches up,
-unpin both. Avoid a blanket `cargo update` (it would float the subcrates
-back onto sqlx 0.9); update specific packages instead.
+`Cargo.lock`): later patches moved to sqlx 0.9. better-auth.rs's
+`SqlxAdapter` shares this same `PgPool`, so it must stay on sqlx 0.8 too —
+currently it does. Avoid a blanket `cargo update` (it would float the
+subcrates and could pull in a newer major); update specific packages
+instead.
 
 ## HTTP API
 
@@ -67,21 +67,22 @@ macro-hashed:
 
 | Method | Path | Body | Auth |
 |---|---|---|---|
-| POST | `/api/auth/register` | `{"username", "password"}` | — |
-| POST | `/api/auth/login` | `{"username", "password"}` | — |
+| POST | `/api/auth/register` | `{"email", "password"}` | — |
+| POST | `/api/auth/login` | `{"email", "password"}` | — |
 | POST | `/api/auth/logout` | — | session |
 | GET | `/api/auth/me` | — | optional |
 | POST | `/api/orders/start` | `{"order": {"item", "amount"}}` | session |
 | GET | `/api/orders/list` | — | session |
 | GET | `/api/orders/{id}` | — | session |
 
-The session rides a cookie, so curl works with a cookie jar:
+The session rides a cookie (issued by better-auth.rs), so curl works with a
+cookie jar:
 
 ```bash
 curl -c /tmp/jar -H 'content-type: application/json' \
-  -d '{"username":"demo","password":"password123"}' \
+  -d '{"email":"demo@example.com","password":"password123"}' \
   localhost:8080/api/auth/register
-# {"id":"7dd9685c-...","username":"demo"}
+# {"id":"...","email":"demo@example.com"}
 
 curl -b /tmp/jar -H 'content-type: application/json' \
   -d '{"order":{"item":"Widget","amount":10}}' \
@@ -103,9 +104,9 @@ docker compose up -d
 cargo test --features server
 ```
 
-Two tests: the argon2 hash round-trip (`src/auth.rs`) and the end-to-end
-pipeline test (`src/jobs.rs`) that boots the worker against real Postgres
-and asserts an order reaches `fulfilled` through every intermediate stage.
+One test: the end-to-end pipeline test (`src/jobs.rs`) that boots the
+worker against real Postgres, signs up a user through better-auth.rs, and
+asserts an order reaches `fulfilled` through every intermediate stage.
 
 ## Deploying
 
@@ -123,10 +124,11 @@ docker build -t myapp .
 docker run -p 8080:8080 --env DATABASE_URL=... myapp
 ```
 
-In production, set `DATABASE_URL` to a real Postgres instance and put the
-app behind TLS — and change `with_secure(false)` to `with_secure(true)` in
-`src/main.rs`'s session layer once you're serving over https, so session
-cookies are marked secure.
+In production, set `DATABASE_URL` to a real Postgres instance, put the app
+behind TLS, and set `AuthConfig`'s cookie security explicitly in
+`state.rs` — better-auth.rs's `config.session.cookie_secure = true` (see
+its [cookies docs](https://better-auth.rs)) once you're serving over https,
+so session cookies are marked secure.
 
 ## You made it
 

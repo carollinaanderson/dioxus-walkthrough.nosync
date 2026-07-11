@@ -2,11 +2,9 @@
 
 ## What you'll learn
 
-How to turn "a `login` function that returns a user" into "a browser that
-stays logged in": cookie-based sessions with
-[`tower-sessions`](https://docs.rs/tower-sessions), a Dioxus **router** with
-multiple pages, and a protected page that redirects you to `/login` if
-you're not signed in.
+How to *use* a session that's already there (better-auth.rs set it up in
+chapter 4): a Dioxus **router** with multiple pages, and a protected page
+that redirects you to `/login` if you're not signed in.
 
 ## Run it
 
@@ -23,29 +21,21 @@ is still global (not scoped to you) — that's next chapter.
 
 ## How it works
 
-- **`tower_sessions_sqlx_store::PostgresStore`** stores session data in
-  Postgres (its own table, migrated with `.migrate()`). `main.rs` wraps it in
-  a `SessionManagerLayer` and layers it onto the axum router, right next to
-  the `AppState` extension layer you already had. Every request now carries
-  a session cookie.
-- **`src/auth.rs`**'s `register`/`login` now take a `session:
-  tower_sessions::Session` extractor and call `session.insert("user_id",
-  user.id)` — that's the whole mechanism. `logout` calls `session.flush()`.
-  `current_user` reads the id back out and looks up the user.
-- **`require_user_id`** is the server-side auth boundary: it reads
-  `user_id` from the session or fails with `"unauthenticated"`. `server.rs`'s
-  `start_order` and `list_orders` both call it now — note they don't yet
-  *use* the returned id for anything, they just require it to exist. That's
-  intentional: this chapter is about **authentication** (are you someone?),
-  chapter 6 is about **authorization/scoping** (which orders are yours?).
 - **`src/app.rs`** now defines a `Route` enum with `#[route(...)]` paths and
   renders `Router::<Route> {}` instead of a single component. Each page
   moved into its own file under `src/pages/`.
 - **`src/pages/orders.rs`** is *client-side* protected: on mount it calls
   `current_user()`, and if that's `None`, navigates to `/login`. This is
-  purely a UX nicety — the real enforcement is `require_user_id` on the
-  server. If you disabled the client redirect entirely, the API would still
-  refuse unauthenticated requests.
+  purely a UX nicety — the real enforcement is `require_user_id` in
+  `auth.rs` (unchanged since chapter 4), which `server.rs`'s `start_order`
+  and `list_orders` both call now. Note they don't yet *use* the returned
+  id for anything, they just require it to exist. That's intentional: this
+  chapter is about **authentication** (are you someone?), chapter 6 is
+  about **authorization/scoping** (which orders are yours?).
+- `main.rs` needed no session middleware to add — better-auth.rs already
+  handles the session cookie internally from inside `auth.rs`'s
+  `#[server]` fns. All this chapter adds on the server side is the
+  `require_user_id` calls in `server.rs`.
 
 ## Your turn: get to chapter 6
 
@@ -59,11 +49,13 @@ Chapter 6 finally scopes orders to the logged-in user: each order gets a
    cd ../my-06-orders-per-user
    ```
 
-2. **Add a migration**, `migrations/0003_add_user_id_to_orders.sql`:
+2. **Add a migration**, `migrations/0003_add_user_id_to_orders.sql`. Note
+   the column type is `TEXT`, matching better-auth.rs's user ids — not
+   `UUID`:
 
    ```sql
    ALTER TABLE orders
-       ADD COLUMN user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+       ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE CASCADE;
 
    -- This is a fresh tutorial database, so `orders` is empty here — no rows
    -- to backfill. In a real app with existing data you'd backfill user_id
@@ -82,20 +74,20 @@ Chapter 6 finally scopes orders to the logged-in user: each order gets a
    `list_for_user` (next step) is about to filter and sort by exactly
    `(user_id, created_at DESC)` on every single call.
 
-3. **Update `orders.rs`** so every function takes a `user_id: Uuid` and
+3. **Update `orders.rs`** so every function takes a `user_id: &str` and
    uses it:
 
    ```rust
    #[derive(Debug, Clone, PartialEq, FromRow)]
    pub struct OrderRow {
        pub id: Uuid,
-       pub user_id: Uuid,
+       pub user_id: String,
        pub item: String,
        pub amount: i64,
        pub status: String,
    }
 
-   pub async fn insert(pool: &PgPool, user_id: Uuid, item: &str, amount: u32) -> Result<OrderRow, sqlx::Error> {
+   pub async fn insert(pool: &PgPool, user_id: &str, item: &str, amount: u32) -> Result<OrderRow, sqlx::Error> {
        sqlx::query_as::<_, OrderRow>(
            "INSERT INTO orders (user_id, item, amount) VALUES ($1, $2, $3)
             RETURNING id, user_id, item, amount, status",
@@ -107,7 +99,7 @@ Chapter 6 finally scopes orders to the logged-in user: each order gets a
        .await
    }
 
-   pub async fn list_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<OrderRow>, sqlx::Error> {
+   pub async fn list_for_user(pool: &PgPool, user_id: &str) -> Result<Vec<OrderRow>, sqlx::Error> {
        sqlx::query_as::<_, OrderRow>(
            "SELECT id, user_id, item, amount, status FROM orders
             WHERE user_id = $1 ORDER BY created_at DESC",
@@ -128,19 +120,19 @@ Chapter 6 finally scopes orders to the logged-in user: each order gets a
    — now *use* what it returns instead of discarding it:
 
    ```rust
-   #[post("/api/orders/start", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+   #[post("/api/orders/start", state: axum::Extension<crate::state::AppState>)]
    pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
-       let user_id = crate::auth::require_user_id(&session).await?;
-       let row = crate::orders::insert(&state.pool, user_id, &order.item, order.amount)
+       let user_id = crate::auth::require_user_id(&state).await?;
+       let row = crate::orders::insert(&state.pool, &user_id, &order.item, order.amount)
            .await
            .map_err(|e| ServerFnError::new(e.to_string()))?;
        Ok(row.id.to_string())
    }
 
-   #[get("/api/orders/list", state: axum::Extension<crate::state::AppState>, session: tower_sessions::Session)]
+   #[get("/api/orders/list", state: axum::Extension<crate::state::AppState>)]
    pub async fn list_orders() -> ServerFnResult<Vec<OrderDto>> {
-       let user_id = crate::auth::require_user_id(&session).await?;
-       let rows = crate::orders::list_for_user(&state.pool, user_id)
+       let user_id = crate::auth::require_user_id(&state).await?;
+       let rows = crate::orders::list_for_user(&state.pool, &user_id)
            .await
            .map_err(|e| ServerFnError::new(e.to_string()))?;
        Ok(rows.into_iter().map(dto).collect())
@@ -148,7 +140,7 @@ Chapter 6 finally scopes orders to the logged-in user: each order gets a
    ```
 
    This one-line change per function — `let user_id = ...?;` instead of
-   `crate::auth::require_user_id(&session).await?;` on its own — is the
+   `crate::auth::require_user_id(&state).await?;` on its own — is the
    entire difference between "you must be logged in" (chapter 5,
    authentication) and "you can only see your own orders" (this chapter,
    authorization). Same guard call; the return value just gets used now.
