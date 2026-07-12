@@ -3,14 +3,14 @@
 ## What you'll learn
 
 Turning "you must be logged in" into "you can only see *your* stuff": a
-foreign key, a scoped query, and the difference between authentication and
-authorization.
+scoped query keyed by the Clerk user id, and the difference between
+authentication and authorization.
 
 ## Run it
 
 ```bash
 docker compose up -d          # Postgres 16 on localhost:5436
-cp .env.example .env
+cp .env.example .env          # paste your pk_test_… / sk_test_… keys
 dx serve
 ```
 
@@ -20,20 +20,22 @@ its own orders now.
 
 ## How it works
 
-- **`migrations/0003_add_user_id_to_orders.sql`** adds `user_id` as a
+- **`migrations/0002_add_user_id_to_orders.sql`** adds `user_id` as a
   nullable column first, then makes it `NOT NULL` in a second statement.
   That two-step is a real-world pattern: on a table with existing rows,
   adding a `NOT NULL` column in one step fails (existing rows have no value
   to put there) — you add it nullable, backfill, *then* tighten it. Our
   table happens to be empty, but the migration is written the way you'd
-  write it against a live database. The column type is `TEXT`, not `UUID`
-  — better-auth.rs's user ids are strings, not the `uuid` crate's `Uuid`.
-- **`src/orders.rs`**: every function now takes a `user_id: &str` and puts
+  write it against a live database. The column type is `TEXT`, not `UUID`,
+  and it is a plain column, **not** a foreign key: Clerk user ids are
+  strings like `user_2abc…`, and there is no local `users` table to
+  reference because accounts live in Clerk.
+- **`src/orders.rs`**: every function takes a `user_id: &str` and puts
   it in the query — `insert` writes it, `list_for_user`/`get_for_user` add
   `WHERE user_id = $1`. There is no code path that returns another user's
   order, because the SQL itself won't produce one.
-- **`src/server.rs`**: `require_user_id`'s return value is no longer
-  discarded — it's the `user_id` passed into every store call.
+- **`src/server.rs`**: `require_user_id()`'s return value is no longer
+  discarded — it's the Clerk `user_id` passed into every store call.
   **This is the authentication → authorization line**: chapter 5 answered
   "is there *a* valid user?"; this chapter answers "which rows belong to
   *that* user?".
@@ -59,8 +61,8 @@ background pipeline: `graphile_worker` chains three jobs
 
    ```toml
    # =0.13.1: last version on sqlx 0.8; later versions moved to sqlx 0.9.
-   # better-auth.rs's SqlxAdapter shares one PgPool with graphile_worker
-   # here, so both must agree on sqlx's major version.
+   # graphile_worker shares one PgPool with your own order queries here, so
+   # both must agree on sqlx's major version.
    graphile_worker = { version = "=0.13.1", optional = true }
    ```
 
@@ -172,7 +174,9 @@ background pipeline: `graphile_worker` chains three jobs
    cloneable `WorkerUtils` handle (store it in `AppState`, next to `pool`)
    that server functions use to enqueue jobs — the `worker` value itself,
    which owns the polling loop, gets moved into `tokio::spawn(...)` and
-   left running in the background for the lifetime of the process.
+   left running in the background for the lifetime of the process. Note
+   `AppState::new` now returns `(Self, JoinHandle<…>)` — the worker task
+   handle — so `main.rs` destructures it as `let (state, _) = …`.
 
 6. **Kick off the pipeline in `start_order`:**
 
@@ -203,7 +207,7 @@ background pipeline: `graphile_worker` chains three jobs
        loop {
            match list_orders().await {
                Ok(list) => { orders.set(list); error.set(None); }
-               Err(e) => { /* same UNAUTHENTICATED check as before */ }
+               Err(e) => { error.set(Some(e.to_string())); }
            }
            sleep_ms(1500).await;
        }
@@ -245,10 +249,9 @@ Watch an order you create walk `queued → validating → charging → fulfillin
 ## Check your work
 
 [chapters/07-background-jobs](../07-background-jobs) has the full working
-version — the same app documented in the root README, including an e2e test
-that runs the pipeline against real Postgres. That test creates its test
-user through `auth.rs`'s `register` function rather than touching
-`users.rs` directly — there's no `users.rs` left to touch; better-auth.rs
-owns that table.
+version — the same app documented in the root README. Because accounts live
+in Clerk, there's no local `users` table and no `register` server fn: the
+server-side identity comes entirely from Clerk's verified session via
+`require_user_id()`.
 
 **Next:** [Chapter 7 — Background jobs](../07-background-jobs/README.md)

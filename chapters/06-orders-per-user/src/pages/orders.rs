@@ -1,20 +1,28 @@
 #![allow(non_snake_case)]
 //! Protected orders page — now genuinely showing only your own orders.
+//! `SignedOut` + `RedirectToSignIn` send anonymous visitors to sign in; the
+//! real UI only renders inside `SignedIn`. Server fns enforce auth themselves
+//! via `require_user_id`, which is also what scopes the query to you.
 
 use dioxus::prelude::*;
+use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut, UserButton};
 
-use crate::app::Route;
-use crate::auth::{current_user, logout, CurrentUser, UNAUTHENTICATED};
 use crate::server::{list_orders, start_order, OrderDto, OrderInput};
 
 #[component]
 pub fn OrdersPage() -> Element {
+    rsx! {
+        SignedOut { RedirectToSignIn {} }
+        SignedIn { OrdersView {} }
+    }
+}
+
+#[component]
+fn OrdersView() -> Element {
     let mut item = use_signal(|| "Widget".to_string());
     let mut amount = use_signal(|| "10".to_string());
     let mut orders = use_signal(Vec::<OrderDto>::new);
     let mut error = use_signal(|| Option::<String>::None);
-    let mut user = use_signal(|| Option::<CurrentUser>::None);
-    let nav = use_navigator();
 
     let refresh = move |_| async move {
         match list_orders().await {
@@ -22,26 +30,9 @@ pub fn OrdersPage() -> Element {
                 orders.set(list);
                 error.set(None);
             }
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains(UNAUTHENTICATED) {
-                    nav.push(Route::LoginPage {});
-                } else {
-                    error.set(Some(msg));
-                }
-            }
-        }
-    };
-
-    use_future(move || async move {
-        match current_user().await {
-            Ok(Some(u)) => user.set(Some(u)),
-            Ok(None) => {
-                nav.push(Route::LoginPage {});
-            }
             Err(e) => error.set(Some(e.to_string())),
         }
-    });
+    };
 
     use_future(move || async move {
         if let Ok(list) = list_orders().await {
@@ -51,12 +42,7 @@ pub fn OrdersPage() -> Element {
 
     let create = move |_| async move {
         let amt = amount().trim().parse::<u32>().unwrap_or(0);
-        match start_order(OrderInput {
-            item: item(),
-            amount: amt,
-        })
-        .await
-        {
+        match start_order(OrderInput { item: item(), amount: amt }).await {
             Ok(_) => {
                 error.set(None);
                 if let Ok(list) = list_orders().await {
@@ -67,11 +53,6 @@ pub fn OrdersPage() -> Element {
         }
     };
 
-    let sign_out = move |_| async move {
-        let _ = logout().await;
-        nav.push(Route::LoginPage {});
-    };
-
     rsx! {
         main { class: "wrap",
             header { class: "nav",
@@ -80,10 +61,7 @@ pub fn OrdersPage() -> Element {
                     p { class: "sub", "Chapter 6: orders belong to whoever created them." }
                 }
                 div { class: "row",
-                    if let Some(u) = user() {
-                        span { class: "who", "Signed in as {u.email}" }
-                    }
-                    button { class: "ghost", onclick: sign_out, "Sign out" }
+                    UserButton {}
                 }
             }
 
