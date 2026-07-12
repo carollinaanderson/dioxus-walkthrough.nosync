@@ -20,6 +20,7 @@ You'll need:
 - **Rust** — [rustup.rs](https://rustup.rs)
 - **The Dioxus CLI** (`dx`) — `cargo install dioxus-cli`
 - **Docker** — for Postgres, starting in chapter 3 ([docker.com](https://www.docker.com/get-started/))
+- **A Clerk account** — free at [clerk.com](https://clerk.com); starting in chapter 4 you'll need a publishable key and a secret key from your Clerk app
 
 No prior Dioxus or async Rust experience assumed. We'll explain concepts as
 we hit them.
@@ -31,8 +32,8 @@ we hit them.
 | 1 | [hello-dioxus](chapters/01-hello-dioxus/README.md) | A minimal Dioxus web app — components, `rsx!`, running `dx serve` |
 | 2 | [server-functions](chapters/02-server-functions/README.md) | Turning on the `server` feature and calling a `#[server]` function from the browser |
 | 3 | [orders-database](chapters/03-orders-database/README.md) | Talking to Postgres with `sqlx`, and a real `orders` table |
-| 4 | [user-accounts](chapters/04-user-accounts/README.md) | Wiring up better-auth.rs — email/password accounts backed by its own Postgres tables |
-| 5 | [sessions](chapters/05-sessions/README.md) | Using the session better-auth.rs already gave you: protecting a page, routing between pages |
+| 4 | [user-accounts](chapters/04-user-accounts/README.md) | Wiring up Clerk — hosted email/password (and social) accounts with drop-in components; no local auth tables |
+| 5 | [sessions](chapters/05-sessions/README.md) | Using Clerk sessions: gating pages with `SignedIn`/`SignedOut`, embedded sign-in/up, protected routes |
 | 6 | [orders-per-user](chapters/06-orders-per-user/README.md) | Tying orders to the logged-in user |
 | 7 | [background-jobs](chapters/07-background-jobs/README.md) | A `graphile_worker` job pipeline, live status polling, and shipping with Docker |
 
