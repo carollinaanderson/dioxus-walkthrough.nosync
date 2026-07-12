@@ -1,12 +1,12 @@
 #![allow(non_snake_case)]
 //! Protected orders page: create an order, watch the graphile_worker pipeline
-//! advance its status via polling. Redirects to /login when unauthenticated
-//! (client-side UX only — server fns enforce auth themselves).
+//! advance its status via polling. Clerk gates the page (`RedirectToSignIn`);
+//! server fns enforce auth themselves via `require_user_id`.
 
 use dioxus::prelude::*;
+use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut, UserButton};
 
-use crate::app::{status_class, Route};
-use crate::auth::{current_user, logout, CurrentUser, UNAUTHENTICATED};
+use crate::app::status_class;
 use crate::server::{list_orders, start_order, OrderDto, OrderInput};
 
 /// Interval sleep for the polling loop. The loop only ever runs on the wasm
@@ -21,23 +21,18 @@ async fn sleep_ms(_ms: u32) {
 
 #[component]
 pub fn OrdersPage() -> Element {
+    rsx! {
+        SignedOut { RedirectToSignIn {} }
+        SignedIn { OrdersView {} }
+    }
+}
+
+#[component]
+fn OrdersView() -> Element {
     let mut item = use_signal(|| "Widget".to_string());
     let mut amount = use_signal(|| "10".to_string());
     let mut orders = use_signal(Vec::<OrderDto>::new);
     let mut error = use_signal(|| Option::<String>::None);
-    let mut user = use_signal(|| Option::<CurrentUser>::None);
-    let nav = use_navigator();
-
-    // Client-side guard + identity for the header.
-    use_future(move || async move {
-        match current_user().await {
-            Ok(Some(u)) => user.set(Some(u)),
-            Ok(None) => {
-                nav.push(Route::LoginPage {});
-            }
-            Err(e) => error.set(Some(e.to_string())),
-        }
-    });
 
     // Poll the order list roughly every 1.5s so status transitions show live.
     use_future(move || async move {
@@ -47,14 +42,7 @@ pub fn OrdersPage() -> Element {
                     orders.set(list);
                     error.set(None);
                 }
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains(UNAUTHENTICATED) {
-                        nav.push(Route::LoginPage {});
-                    } else {
-                        error.set(Some(msg));
-                    }
-                }
+                Err(e) => error.set(Some(e.to_string())),
             }
             sleep_ms(1500).await;
         }
@@ -62,20 +50,10 @@ pub fn OrdersPage() -> Element {
 
     let create = move |_| async move {
         let amt = amount().trim().parse::<u32>().unwrap_or(0);
-        match start_order(OrderInput {
-            item: item(),
-            amount: amt,
-        })
-        .await
-        {
+        match start_order(OrderInput { item: item(), amount: amt }).await {
             Ok(_) => error.set(None),
             Err(e) => error.set(Some(e.to_string())),
         }
-    };
-
-    let sign_out = move |_| async move {
-        let _ = logout().await;
-        nav.push(Route::LoginPage {});
     };
 
     rsx! {
@@ -86,10 +64,7 @@ pub fn OrdersPage() -> Element {
                     p { class: "sub", "Dioxus server functions driving a graphile_worker order pipeline." }
                 }
                 div { class: "row",
-                    if let Some(u) = user() {
-                        span { class: "who", "Signed in as {u.email}" }
-                    }
-                    button { class: "ghost", onclick: sign_out, "Sign out" }
+                    UserButton {}
                 }
             }
 

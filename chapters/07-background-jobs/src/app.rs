@@ -20,7 +20,9 @@ pub enum Route {
 pub fn App() -> Element {
     rsx! {
         style { {CSS} }
-        Router::<Route> {}
+        dioxus_clerk::ClerkProvider { publishable_key: env!("CLERK_PUBLISHABLE_KEY"),
+            Router::<Route> {}
+        }
     }
 }
 

@@ -1,55 +1,16 @@
 #![allow(non_snake_case)]
-//! Register page: email/password -> `auth::register` (auto-login) ->
-//! navigate to orders.
+//! Sign-up route: Clerk's embedded `<SignUp />` widget.
 
 use dioxus::prelude::*;
-
-use crate::app::Route;
-use crate::auth::register;
+use dioxus_clerk::SignUp;
 
 #[component]
 pub fn RegisterPage() -> Element {
-    let mut email = use_signal(String::new);
-    let mut password = use_signal(String::new);
-    let mut error = use_signal(|| Option::<String>::None);
-    let nav = use_navigator();
-
-    let submit = move |_| async move {
-        match register(email(), password()).await {
-            Ok(_) => {
-                nav.push(Route::OrdersPage {});
-            }
-            Err(e) => error.set(Some(e.to_string())),
-        }
-    };
-
     rsx! {
         main { class: "wrap narrow",
             h1 { "Create account" }
             p { class: "sub", "MyApp order pipeline demo" }
-            section { class: "card",
-                div { class: "col",
-                    input {
-                        value: "{email}",
-                        oninput: move |e| email.set(e.value()),
-                        placeholder: "Email",
-                    }
-                    input {
-                        r#type: "password",
-                        value: "{password}",
-                        oninput: move |e| password.set(e.value()),
-                        placeholder: "Password (min 8 chars)",
-                    }
-                    button { class: "primary", onclick: submit, "Register" }
-                }
-                if let Some(e) = error() {
-                    p { class: "err", "{e}" }
-                }
-                p { class: "muted",
-                    "Already have an account? "
-                    Link { to: Route::LoginPage {}, "Sign in" }
-                }
-            }
+            SignUp {}
         }
     }
 }

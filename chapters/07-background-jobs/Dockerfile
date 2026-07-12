@@ -4,6 +4,10 @@ RUN cargo install cargo-binstall --locked \
     && cargo binstall dioxus-cli --no-confirm
 WORKDIR /app
 COPY . .
+# The publishable key is read at compile time via env! in app.rs, so it must
+# be present during the bundle. Pass it with `--build-arg CLERK_PUBLISHABLE_KEY=…`.
+ARG CLERK_PUBLISHABLE_KEY
+ENV CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
 RUN dx bundle --platform web --release
 
 # Runtime stage: just the server binary + static assets.

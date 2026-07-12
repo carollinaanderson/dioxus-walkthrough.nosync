@@ -112,10 +112,7 @@ impl TaskHandler for FulfillOrder {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::time::Duration;
-
-    use better_auth::types::{AuthRequest, HttpMethod};
 
     use super::*;
     use crate::state::AppState;
@@ -123,32 +120,16 @@ mod tests {
     /// End-to-end against real Postgres (docker compose up -d): a queued order
     /// walks validating -> charging -> fulfilling -> fulfilled once the worker
     /// picks up the chained jobs.
+    ///
+    /// Auth lives in Clerk in the running app, but this test exercises the
+    /// *pipeline*, not sign-in — so it uses a synthetic Clerk-style user id
+    /// (`orders.user_id` is a plain string column with no local FK) rather
+    /// than standing up a real Clerk session.
     #[tokio::test]
     async fn order_pipeline_runs_to_fulfilled() {
         let (state, worker_handle) = AppState::new().await;
 
-        let email = format!("it-user-{}@example.com", uuid::Uuid::new_v4());
-        let body = serde_json::json!({
-            "email": email,
-            "password": "hunter2-integration",
-            "name": email,
-        });
-        let response = state
-            .auth
-            .handle_request(AuthRequest::from_parts(
-                HttpMethod::Post,
-                "/sign-up/email".to_string(),
-                HashMap::from([("content-type".to_string(), "application/json".to_string())]),
-                Some(serde_json::to_vec(&body).unwrap()),
-                HashMap::new(),
-            ))
-            .await
-            .expect("sign-up should succeed");
-        let signed_up: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
-        let user_id = signed_up["user"]["id"]
-            .as_str()
-            .expect("sign-up response should include user.id")
-            .to_string();
+        let user_id = format!("user_test_{}", uuid::Uuid::new_v4().simple());
 
         let row = crate::orders::insert(&state.pool, &user_id, "Widget", 10)
             .await

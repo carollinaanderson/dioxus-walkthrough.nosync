@@ -1,7 +1,7 @@
 # Chapter 7 — Background jobs
 
 This is the final chapter — the same app described in the [root
-README](../../README.md): Dioxus + session auth + Postgres-backed orders +
+README](../../README.md): Dioxus + Clerk auth + Postgres-backed orders +
 a `graphile_worker` job pipeline, all in one binary.
 
 ## What you'll learn
@@ -15,11 +15,11 @@ three jobs together and watch the UI reflect their progress live.
 
 ```bash
 docker compose up -d          # Postgres 16 on localhost:5437
-cp .env.example .env
+cp .env.example .env          # paste your pk_test_… / sk_test_… keys
 dx serve                      # http://localhost:8080
 ```
 
-Register, create an order, and watch its status pill walk
+Sign in through Clerk, create an order, and watch its status pill walk
 `queued → validating → charging → fulfilling → fulfilled` (~4 seconds) with
 no manual refresh.
 
@@ -45,57 +45,56 @@ no manual refresh.
   repeat. `app.rs`'s `status_class` maps each status string to a `.pill`
   CSS class (`ok` for fulfilled, `err` for failed, `wait` for anything
   in-flight) so progress is visible at a glance.
+- **Auth is Clerk.** The page is gated by `SignedOut { RedirectToSignIn }` /
+  `SignedIn { … }`; the server trusts the identity that `ClerkAuthLayer`
+  verified from the session cookie, read via `require_user_id()`.
 - **The e2e test** (`src/jobs.rs`, `order_pipeline_runs_to_fulfilled`) boots
   a real `AppState` against your running Postgres, enqueues a job, and polls
   the database directly until the order reaches `'fulfilled'` — proving the
-  whole chain actually runs, not just that each handler compiles.
+  whole chain actually runs, not just that each handler compiles. It uses a
+  synthetic Clerk-style user id since it exercises the pipeline, not sign-in.
 
 ### Version pinning note
 
 `graphile_worker` is pinned to `=0.13.1` (and its subcrates are pinned in
-`Cargo.lock`): later patches moved to sqlx 0.9. better-auth.rs's
-`SqlxAdapter` shares this same `PgPool`, so it must stay on sqlx 0.8 too —
-currently it does. Avoid a blanket `cargo update` (it would float the
-subcrates and could pull in a newer major); update specific packages
-instead.
+`Cargo.lock`): later patches moved to sqlx 0.9. Our own order queries share
+this same `PgPool`, so they must stay on sqlx 0.8 too — currently they do.
+Avoid a blanket `cargo update` (it would float the subcrates and could pull
+in a newer major); update specific packages instead.
 
 ## HTTP API
 
 Server functions are declared with explicit routes
 (`#[post("/api/orders/start", ...)]`), so the wire API is stable instead of
-macro-hashed:
+macro-hashed. Authentication is handled entirely by Clerk in the browser
+(clerk-js) — there are no `/api/auth/*` endpoints of our own:
 
 | Method | Path | Body | Auth |
 |---|---|---|---|
-| POST | `/api/auth/register` | `{"email", "password"}` | — |
-| POST | `/api/auth/login` | `{"email", "password"}` | — |
-| POST | `/api/auth/logout` | — | session |
-| GET | `/api/auth/me` | — | optional |
-| POST | `/api/orders/start` | `{"order": {"item", "amount"}}` | session |
-| GET | `/api/orders/list` | — | session |
-| GET | `/api/orders/{id}` | — | session |
+| POST | `/api/orders/start` | `{"order": {"item", "amount"}}` | Clerk session |
+| GET | `/api/orders/list` | — | Clerk session |
+| GET | `/api/orders/{id}` | — | Clerk session |
 
-The session rides a cookie (issued by better-auth.rs), so curl works with a
-cookie jar:
+Protected endpoints require a verified Clerk session. In the browser that
+rides on Clerk's session cookie automatically. To call them from a script,
+mint a short-lived session token with Clerk's client (`use_auth().get_token()`
+in the app, or Clerk's Backend API) and send it as `Authorization: Bearer
+<token>`:
 
 ```bash
-curl -c /tmp/jar -H 'content-type: application/json' \
-  -d '{"email":"demo@example.com","password":"password123"}' \
-  localhost:8080/api/auth/register
-# {"id":"...","email":"demo@example.com"}
-
-curl -b /tmp/jar -H 'content-type: application/json' \
+curl -H "Authorization: Bearer $CLERK_TOKEN" \
+  -H 'content-type: application/json' \
   -d '{"order":{"item":"Widget","amount":10}}' \
   localhost:8080/api/orders/start
 # "7db27402-..."
 
-curl -b /tmp/jar localhost:8080/api/orders/list
+curl -H "Authorization: Bearer $CLERK_TOKEN" localhost:8080/api/orders/list
 # [{"id":"7db27402-...","item":"Widget","amount":10,"status":"validating"}]
 ```
 
 Unauthenticated calls to protected endpoints fail with an `unauthenticated`
-error, which the UI maps to a redirect to `/login`. Server functions are the
-enforcement boundary — the client-side route guard is only UX.
+error, which the UI handles by redirecting to Clerk's sign-in flow. Server
+functions are the enforcement boundary — the client-side gating is only UX.
 
 ## Tests
 
@@ -105,8 +104,9 @@ cargo test --features server
 ```
 
 One test: the end-to-end pipeline test (`src/jobs.rs`) that boots the
-worker against real Postgres, signs up a user through better-auth.rs, and
-asserts an order reaches `fulfilled` through every intermediate stage.
+worker against real Postgres, enqueues an order for a synthetic user id, and
+asserts it reaches `fulfilled` through every intermediate stage. It doesn't
+touch Clerk — the pipeline is independent of how the user authenticated.
 
 ## Deploying
 
@@ -120,20 +120,26 @@ crate, so it doesn't need the rest of the workspace):
 
 ```bash
 cd chapters/07-background-jobs
-docker build -t myapp .
-docker run -p 8080:8080 --env DATABASE_URL=... myapp
+docker build --build-arg CLERK_PUBLISHABLE_KEY=pk_live_... -t myapp .
+docker run -p 8080:8080 \
+  --env DATABASE_URL=... \
+  --env CLERK_SECRET_KEY=sk_live_... \
+  myapp
 ```
 
-In production, set `DATABASE_URL` to a real Postgres instance, put the app
-behind TLS, and set `AuthConfig`'s cookie security explicitly in
-`state.rs` — better-auth.rs's `config.session.cookie_secure = true` (see
-its [cookies docs](https://better-auth.rs)) once you're serving over https,
-so session cookies are marked secure.
+Note `CLERK_PUBLISHABLE_KEY` is baked in at **build time** (`env!`), so it's a
+`--build-arg` (the `Dockerfile` forwards it into the `dx bundle` step), not a
+runtime `--env`; keep it consistent with the value the server uses. Only the
+secret key is passed at runtime. In production, set `DATABASE_URL`
+to a real Postgres instance, use your Clerk **live** keys (`pk_live_…` /
+`sk_live_…`), add your deployed domain to the Clerk dashboard's allowed
+origins, and put the app behind TLS — Clerk sets secure session cookies for
+you once you're serving over https.
 
 ## You made it
 
 You've built a full-stack Dioxus app from an empty `dx new` up through
-sessions, per-user data, and a real background job pipeline — the same
+hosted auth, per-user data, and a real background job pipeline — the same
 shape of app you'd reach for at a startup or a side project. From here,
 poking at this chapter directly (add a new job stage, add rate limiting to
 `start_order`, swap the CSS for a UI library) is a good way to make it your
