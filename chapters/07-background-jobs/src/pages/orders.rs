@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 //! Protected orders page: create an order, watch the graphile_worker pipeline
 //! advance its status via polling. Clerk gates the page (`RedirectToSignIn`);
-//! server fns enforce auth themselves via `require_user_id`.
+//! server fns enforce auth themselves via `dioxus_clerk::server::current_auth`.
 
 use dioxus::prelude::*;
 use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut, UserButton};
@@ -20,7 +20,7 @@ async fn sleep_ms(_ms: u32) {
 }
 
 #[component]
-pub fn OrdersPage() -> Element {
+pub fn Orders() -> Element {
     rsx! {
         SignedOut { RedirectToSignIn {} }
         SignedIn { OrdersView {} }
@@ -50,7 +50,12 @@ fn OrdersView() -> Element {
 
     let create = move |_| async move {
         let amt = amount().trim().parse::<u32>().unwrap_or(0);
-        match start_order(OrderInput { item: item(), amount: amt }).await {
+        match start_order(OrderInput {
+            item: item(),
+            amount: amt,
+        })
+        .await
+        {
             Ok(_) => error.set(None),
             Err(e) => error.set(Some(e.to_string())),
         }

@@ -33,7 +33,7 @@ fn dto(row: crate::orders::OrderRow) -> OrderDto {
 pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
     let row = crate::orders::insert(&state.pool, &order.item, order.amount)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(ServerFnError::new)?;
     Ok(row.id.to_string())
 }
 
@@ -41,6 +41,6 @@ pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
 pub async fn list_orders() -> ServerFnResult<Vec<OrderDto>> {
     let rows = crate::orders::list(&state.pool)
         .await
-        .map_err(|e| ServerFnError::new(e.to_string()))?;
+        .map_err(ServerFnError::new)?;
     Ok(rows.into_iter().map(dto).collect())
 }

@@ -39,8 +39,12 @@ order is visible to everyone — there's no concept of a user yet.
 
 ## Your turn: get to chapter 4
 
-Chapter 4 adds a `users` table and register/login — but *without* wiring
-sessions yet, so you can focus purely on the auth logic first.
+Chapter 4 adds real accounts — but instead of hand-rolling password hashing
+and a `users` table, you'll hand auth to [Clerk](https://clerk.com), a hosted
+authentication service. You mount a `ClerkProvider`, drop in Clerk's own
+sign-in / sign-up / user-menu widgets, and gate the UI on whether someone is
+signed in. There's no auth migration, no `users` table, and no credential code
+of your own — accounts and sessions live in Clerk's cloud.
 
 1. **Copy this chapter as your working copy:**
 
@@ -49,171 +53,217 @@ sessions yet, so you can focus purely on the auth logic first.
    cd ../my-04-user-accounts
    ```
 
-2. **Update `docker-compose.yml` / `.env`** to a new db name and port (`5434`
-   / `myapp_ch04` in the reference code) so this chapter doesn't collide
-   with a chapter-3 Postgres you might still have running.
+2. **Get your Clerk keys.** Create a free app at
+   [dashboard.clerk.com](https://dashboard.clerk.com), open **API keys**, and
+   copy the **Publishable key** (`pk_test_…`) and **Secret key** (`sk_test_…`).
+   The publishable key is safe to ship to the browser; the secret key is
+   server-only and must never reach the WASM bundle.
 
-3. **Add a migration**, `migrations/0002_create_users.sql`:
+3. **Point this chapter at its own database and add the Clerk keys.** Bump the
+   port and db name in `docker-compose.yml` (`5434` / `myapp_ch04`) so it
+   doesn't collide with a chapter-3 Postgres you might still have running, then
+   replace `.env.example` (and your `.env`) with:
 
-   ```sql
-   CREATE TABLE IF NOT EXISTS users (
-       id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-       username      TEXT        NOT NULL UNIQUE,
-       password_hash TEXT        NOT NULL,
-       created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-   );
+   ```
+   DATABASE_URL=postgres://myapp:myapp@localhost:5434/myapp_ch04
+   CLERK_PUBLISHABLE_KEY=pk_test_replace_me # <-- add this
+   CLERK_SECRET_KEY=sk_test_replace_me      # <-- add this
    ```
 
-   `UNIQUE` on `username` matters: it's Postgres, not your Rust code,
-   guaranteeing no two rows ever share a username — even if two register
-   requests race each other at the exact same moment. `password_hash` is
-   named that way on purpose; there's no `password` column, because a raw
-   password should never reach the database.
-
-4. **Add `argon2` as a server-only dependency:**
+4. **Add the Clerk dependencies.** Under `[dependencies]`, add two crates —
+   `serde_json` (Clerk's components need it) and `dioxus-clerk` itself. Unlike
+   the server-only crates, these aren't `optional`; the client needs them too:
 
    ```toml
-   argon2 = { version = "0.5", optional = true }
+   serde_json = "1"     # <-- add this
+   dioxus-clerk = "0.1" # <-- add this
    ```
 
-   and `"dep:argon2"` to the `server` feature list.
-   [argon2](https://docs.rs/argon2) is a password-hashing algorithm — slow
-   and memory-hard *on purpose*, so that even if your database leaks,
-   brute-forcing the original passwords out of the hashes is expensive.
+   Extend the `server` feature so Clerk's server-side half compiles into the
+   native binary:
 
-5. **Write `src/users.rs`**, the same shape of store module as
-   `orders.rs`:
+   ```toml
+   server = ["dioxus/server", "dep:axum", "dep:tokio", "dep:sqlx", "dep:uuid", "dep:dotenvy", "dioxus-clerk/server"]
+   #                                                                                          ^^^^^^^^^^^^^^^^^^^^^ add this
+   ```
+
+   Finally add a `[build-dependencies]` section — the build script in the next
+   step needs `dotenvy`, and build scripts can't see your regular
+   `[dependencies]`:
+
+   ```toml
+   [build-dependencies] # <-- add this section
+   dotenvy = "0.15"
+   ```
+
+5. **Add a `build.rs` that loads `.env` at build time.** The publishable key
+   is read with `env!("CLERK_PUBLISHABLE_KEY")` — a *compile-time* macro that
+   reads the environment of the `cargo`/`dx` process, not your `.env` file. The
+   build script bridges that gap so you don't have to `export` the key before
+   every build. Create `build.rs` at the crate root with an empty `main`:
 
    ```rust
-   use sqlx::{prelude::FromRow, PgPool};
-   use uuid::Uuid;
-
-   #[derive(Debug, Clone, FromRow)]
-   pub struct UserRow {
-       pub id: Uuid,
-       pub username: String,
-       pub password_hash: String,
-   }
-
-   pub async fn insert(pool: &PgPool, username: &str, password_hash: &str) -> Result<UserRow, sqlx::Error> {
-       sqlx::query_as::<_, UserRow>(
-           "INSERT INTO users (username, password_hash) VALUES ($1, $2)
-            RETURNING id, username, password_hash",
-       )
-       .bind(username)
-       .bind(password_hash)
-       .fetch_one(pool)
-       .await
-   }
-
-   pub async fn find_by_username(pool: &PgPool, username: &str) -> Result<Option<UserRow>, sqlx::Error> {
-       sqlx::query_as::<_, UserRow>("SELECT id, username, password_hash FROM users WHERE username = $1")
-           .bind(username)
-           .fetch_optional(pool)
-           .await
+   fn main() {
+       // fill in next
    }
    ```
 
-   `find_by_username` returns `Option<UserRow>` (via `.fetch_optional`), not
-   `UserRow` — "no such user" is an expected, ordinary outcome here, not an
-   error, so the type says so.
+   Tell Cargo to rerun the script whenever `.env` changes:
 
-6. **Create `src/auth.rs`** with the hashing helpers:
+   ```rust
+   fn main() {
+       // Rerun whenever .env changes (including when it's first created).
+       println!("cargo:rerun-if-changed=.env"); // <-- add this
+   }
+   ```
+
+   Then read each `.env` entry and re-emit it as a `rustc-env` var so `env!`
+   can see it:
+
+   ```rust
+       if let Ok(iter) = dotenvy::from_path_iter(".env") {       // <-- add this
+           for (key, value) in iter.flatten() {                 // <-- add this
+               println!("cargo:rustc-env={key}={value}");       // <-- add this
+           }
+       }
+   ```
+
+   If `.env` is absent, `from_path_iter` returns `Err`, the block is skipped,
+   and the build falls back to the real process environment (how CI and the
+   Docker build supply the key). So `cp .env.example .env` then `dx serve` is
+   all you need — no manual `export`.
+
+6. **Verify the Clerk session on the server.** In `main.rs`'s server branch,
+   build a `ClerkAuthLayer` and add it to the router. Right now the branch is:
 
    ```rust
    #[cfg(feature = "server")]
-   pub(crate) fn hash_password(password: &str) -> Result<String, String> {
-       use argon2::password_hash::{rand_core::OsRng, SaltString};
-       use argon2::{Argon2, PasswordHasher};
-       let salt = SaltString::generate(&mut OsRng);
-       Argon2::default()
-           .hash_password(password.as_bytes(), &salt)
-           .map(|h| h.to_string())
-           .map_err(|e| e.to_string())
-   }
+   dioxus::serve(|| async {
+       let state = state::AppState::new().await;
+       Ok(dioxus::server::router(App).layer(axum::Extension(state)))
+   });
+   ```
 
-   #[cfg(feature = "server")]
-   fn verify_password(password: &str, hash: &str) -> bool {
-       use argon2::{Argon2, PasswordHash, PasswordVerifier};
-       PasswordHash::new(hash)
-           .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
-           .unwrap_or(false)
+   Build the layer from the secret key in the environment:
+
+   ```rust
+       let state = state::AppState::new().await;
+       let clerk = dioxus_clerk::server::ClerkAuthLayer::from_env()          // <-- add this
+           .expect("CLERK_SECRET_KEY must be set (see .env)");               // <-- add this
+   ```
+
+   Then attach it alongside the state:
+
+   ```rust
+       Ok(dioxus::server::router(App)
+           .layer(clerk)                    // <-- add this
+           .layer(axum::Extension(state)))
+   ```
+
+   `ClerkAuthLayer` verifies the Clerk session cookie on every request, so
+   from chapter 5 on, server functions can trust the caller's identity. It's
+   harmless here (this chapter has no protected server fn yet), but wiring it
+   now keeps the setup identical across the rest of the tutorial. Your
+   `orders.rs` and `server.rs` stay exactly as they were — orders are still
+   global this chapter.
+
+7. **Move the orders UI into its own component.** In `app.rs`, everything
+   currently inside `App` — the four signals, the `refresh`/`create` handlers,
+   the `use_future`, and the two `section { class: "card" }` blocks — moves
+   into a new `#[component]` so it can be shown only to signed-in users. Cut it
+   into `OrdersSection` (the handlers and error signal are renamed for clarity
+   now that auth pieces sit alongside them):
+
+   ```rust
+   #[component]
+   fn OrdersSection() -> Element {
+       let mut item = use_signal(|| "Widget".to_string());
+       let mut amount = use_signal(|| "10".to_string());
+       let mut orders = use_signal(Vec::<OrderDto>::new);
+       let mut order_error = use_signal(|| Option::<String>::None); // <-- was `error`
+
+       let refresh_orders = move |_| async move { /* the old `refresh` body */ };
+       let create_order = move |_| async move { /* the old `create` body */ };
+
+       use_future(move || async move {
+           if let Ok(list) = list_orders().await {
+               orders.set(list);
+           }
+       });
+
+       rsx! {
+           // the two `section { class: "card" }` blocks, unchanged
+           // (wire the buttons to `create_order` / `refresh_orders`)
+       }
    }
    ```
 
-   `SaltString::generate(&mut OsRng)` makes a fresh random salt *per call* —
-   that's why hashing the same password twice gives two different strings
-   (see the test in the reference code). The salt gets embedded in the
-   output string itself, so `verify_password` doesn't need it passed in
-   separately: `PasswordHash::new(hash)` parses it back out. `verify_password`
-   collapses every failure mode (bad hash format, wrong password) into
-   `false` with `.unwrap_or(false)` — callers only need a yes/no answer.
-
-7. **Add `register` and `login` server functions** to `auth.rs`:
+8. **Rebuild `App` as a Clerk shell.** First widen the import to pull in
+   Clerk's components:
 
    ```rust
    use dioxus::prelude::*;
-   use serde::{Deserialize, Serialize};
+   use dioxus_clerk::{ClerkProvider, SignInButton, SignUpButton, SignedIn, SignedOut, UserButton}; // <-- add this
+   use crate::server::{list_orders, start_order, OrderDto, OrderInput};
+   ```
 
-   #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-   pub struct CurrentUser {
-       pub id: String,
-       pub username: String,
-   }
+   Wrap the page in a `ClerkProvider`. The publishable key is baked in at build
+   time with `env!`, and the provider makes auth state available to every
+   component below it:
 
-   #[post("/api/auth/register", state: axum::Extension<crate::state::AppState>)]
-   pub async fn register(username: String, password: String) -> ServerFnResult<CurrentUser> {
-       let username = username.trim().to_string();
-       if username.is_empty() {
-           return Err(ServerFnError::new("username is required"));
+   ```rust
+   pub fn App() -> Element {
+       rsx! {
+           style { {CSS} }
+           ClerkProvider { publishable_key: env!("CLERK_PUBLISHABLE_KEY"),
+               main { class: "wrap",
+                   // header + gated content below
+               }
+           }
        }
-       if password.len() < 8 {
-           return Err(ServerFnError::new("password must be at least 8 characters"));
-       }
-       if crate::users::find_by_username(&state.pool, &username)
-           .await
-           .map_err(|e| ServerFnError::new(e.to_string()))?
-           .is_some()
-       {
-           return Err(ServerFnError::new("username already taken"));
-       }
-       let hash = hash_password(&password).map_err(ServerFnError::new)?;
-       let user = crate::users::insert(&state.pool, &username, &hash)
-           .await
-           .map_err(|e| ServerFnError::new(e.to_string()))?;
-       Ok(CurrentUser { id: user.id.to_string(), username: user.username })
-   }
-
-   #[post("/api/auth/login", state: axum::Extension<crate::state::AppState>)]
-   pub async fn login(username: String, password: String) -> ServerFnResult<CurrentUser> {
-       let user = crate::users::find_by_username(&state.pool, username.trim())
-           .await
-           .map_err(|e| ServerFnError::new(e.to_string()))?;
-       let user = user.ok_or_else(|| ServerFnError::new("invalid username or password"))?;
-       if !verify_password(&password, &user.password_hash) {
-           return Err(ServerFnError::new("invalid username or password"));
-       }
-       Ok(CurrentUser { id: user.id.to_string(), username: user.username })
    }
    ```
 
-   Notice `login` returns the exact same error message,
-   `"invalid username or password"`, whether the username doesn't exist or
-   the password is wrong. If those errors differed, an attacker could send
-   guesses and learn which usernames are registered just from which error
-   comes back — a real information leak called username enumeration.
-   Neither function stores anything in a session — that's chapter 5, so for
-   now the browser has no memory of who just registered or logged in.
+   Add a header whose right side flips on auth state — sign-in / sign-up
+   buttons when signed out, Clerk's `UserButton` (avatar menu with sign-out)
+   when signed in:
 
-8. **Add register/login forms to the UI**, each calling their server
-   function and displaying the `CurrentUser` (or error) that comes back.
-   Try registering, then reloading the page — the result you saw is gone,
-   because nothing on the server or in the browser remembered it. That gap
-   is exactly what chapter 5 fills.
+   ```rust
+                   header { class: "nav",
+                       div {
+                           h1 { "MyApp" }
+                           p { class: "sub", "Chapter 4: user accounts via Clerk." }
+                       }
+                       div { class: "row",
+                           SignedOut {                                  // <-- rendered only when signed out
+                               SignInButton { class: "primary", "Sign in" }
+                               SignUpButton { class: "ghost", "Create account" }
+                           }
+                           SignedIn { UserButton {} }                   // <-- rendered only when signed in
+                       }
+                   }
+   ```
+
+   Then gate the body: a prompt when signed out, the orders UI when signed in:
+
+   ```rust
+                   SignedOut {                                          // <-- add this
+                       section { class: "card",
+                           p { class: "muted", "Sign in or create an account to place orders." }
+                       }
+                   }
+                   SignedIn { OrdersSection {} }                        // <-- your moved orders UI
+   ```
+
+   `SignedOut`/`SignedIn` render their children based on Clerk's resolved auth
+   state; there are no hand-written forms and no password handling — Clerk's
+   widgets own all of it. Run it, sign up through Clerk's widget, and the
+   header swaps to the `UserButton` while the orders section appears. Orders
+   are still global (everyone signed in sees the same list) — chapter 6 scopes
+   them per user.
 
 ## Check your work
 
-[chapters/04-user-accounts](../04-user-accounts) has the full version,
-including a unit test for the argon2 hash/verify round-trip.
+[chapters/04-user-accounts](../04-user-accounts) has the full version.
 
 **Next:** [Chapter 4 — User accounts](../04-user-accounts/README.md)

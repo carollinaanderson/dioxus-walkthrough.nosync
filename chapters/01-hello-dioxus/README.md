@@ -39,8 +39,10 @@ static page, same as if you'd written it in JavaScript with React.
 ## Your turn: get to chapter 2
 
 Chapter 2 adds a **server**: a real backend process, and a `#[server]`
-function the browser calls over HTTP. Here's how to build that yourself,
-starting from this chapter's code, step by step.
+function the browser calls over HTTP. You'll build it up from this chapter's
+code a piece at a time. Don't worry about getting every detail right — compare
+your result with [chapters/02-server-functions](../02-server-functions) once
+you've had a go.
 
 1. **Copy this chapter as your working copy** (don't edit chapters/01 in
    place — keep it as a clean reference):
@@ -53,133 +55,209 @@ starting from this chapter's code, step by step.
 2. **Turn on Dioxus's `fullstack` feature and add server-only dependencies.**
    Dioxus apps that have a server are compiled *twice*: once to WebAssembly
    for the browser, once to a native binary for the server. Cargo features
-   let one `Cargo.toml` describe both builds — `web` pulls in the browser
-   renderer, `server` pulls in `dioxus/server` plus the native HTTP stack.
-   Replace your `Cargo.toml`'s `[dependencies]` section with:
+   let one `Cargo.toml` describe both builds.
+
+   Start in `Cargo.toml` by switching the `dioxus` line from the `web`
+   feature to `fullstack`:
 
    ```toml
    [dependencies]
+   dioxus = { version = "0.7", features = ["fullstack"] } # <-- was ["web"]
+   ```
+
+   Add the two server-only dependencies right below it, one line at a time:
+
+   ```toml
    dioxus = { version = "0.7", features = ["fullstack"] }
 
    # Server-only — not compiled into the WASM bundle.
-   axum = { version = "0.8", optional = true }
-   tokio = { version = "1", features = ["full"], optional = true }
-
-   [features]
-   default = ["web"]
-   web = ["dioxus/web"]
-   server = ["dioxus/server", "dep:axum", "dep:tokio"]
+   axum = { version = "0.8", optional = true }                     # <-- add this
+   tokio = { version = "1", features = ["full"], optional = true } # <-- add this
    ```
 
-   `axum` and `tokio` are marked `optional = true` — that's what makes them
-   "server-only": Cargo won't compile them in unless the `server` feature is
-   on, and the `server` feature is off by default (`default = ["web"]`).
-   `dx serve` knows to build both feature sets for a fullstack app, so you
-   don't invoke this manually — it does it for you.
+   `optional = true` is what makes them "server-only": Cargo won't compile
+   them unless a feature switches them on. Now add that switch — a new
+   `[features]` section at the bottom of the file, one line at a time:
 
-3. **Branch `main.rs` on which build you're in.** Replace your `fn main()`
-   with:
+   ```toml
+   [features]
+   default = ["web"]                                    # <-- web build is the default
+   web = ["dioxus/web"]                                 # <-- browser/WASM renderer
+   server = ["dioxus/server", "dep:axum", "dep:tokio"]  # <-- native server + its deps
+   ```
+
+   Because `default = ["web"]`, `axum` and `tokio` stay out of the WASM
+   bundle unless something turns on `server`. `dx serve` builds both feature
+   sets for a fullstack app, so you never invoke this split by hand — it does
+   it for you.
+
+3. **Branch `main.rs` on which build you're in.** Right now `main.rs` is just:
 
    ```rust
    mod app;
-   mod server;
    use app::App;
 
+   fn main() {
+       dioxus::launch(App);
+   }
+   ```
+
+   First declare the server module you'll create in the next step:
+
+   ```rust
+   mod app;
+   mod server; // <-- add this
+   use app::App;
+   ```
+
+   Now replace the single `dioxus::launch(App)` with two `#[cfg]`-gated
+   entrypoints. Start with just the client one you already have, now guarded:
+
+   ```rust
+   fn main() {
+       // Client entrypoint: compiled to WASM, runs in the browser.
+       #[cfg(not(feature = "server"))] // <-- add this
+       dioxus::launch(App);
+   }
+   ```
+
+   `#[cfg(not(feature = "server"))]` means "only compile this line when the
+   `server` feature is *off*" — the WASM build, unchanged from chapter 1. Add
+   its mirror image, the native server entrypoint:
+
+   ```rust
    fn main() {
        // Client entrypoint: compiled to WASM, runs in the browser.
        #[cfg(not(feature = "server"))]
        dioxus::launch(App);
 
        // Server entrypoint: compiled natively, runs on your machine.
-       #[cfg(feature = "server")]
-       dioxus::serve(|| async { Ok(dioxus::server::router(App)) });
+       #[cfg(feature = "server")]                                   // <-- add this
+       dioxus::serve(|| async { Ok(dioxus::server::router(App)) }); // <-- add this
    }
    ```
 
-   `#[cfg(not(feature = "server"))]` means "only compile this line when the
-   `server` feature is *off*" — that's the WASM build, so it calls
-   `dioxus::launch` exactly like chapter 1. `#[cfg(feature = "server")]`
-   is its mirror image: only compiled into the native server binary. The
-   two `dioxus::launch`/`dioxus::serve` calls never coexist in the same
-   binary — each build only sees the one that matches its own feature flag.
+   The two calls never coexist in one binary — each build only sees the arm
+   matching its own feature flag. `dioxus::serve` takes a closure returning a
+   `Future` that resolves to a `Result<Router, _>` — async because later
+   chapters do setup here (connecting a database).
+   `dioxus::server::router(App)` builds an axum `Router` that serves your app
+   *and* wires up every `#[server]` function as an HTTP route — the wiring
+   you're about to use.
 
-   `dioxus::serve` takes a closure that returns a `Future` resolving to a
-   `Result<Router, _>` — it's async because building the router might need
-   to do async setup (connect a database, in later chapters).
-   `dioxus::server::router(App)` builds an axum `Router` that serves your
-   Dioxus app *and* wires up every `#[server]` function as an HTTP route —
-   that wiring is what you're about to use in the next step.
+4. **Create `src/server.rs`** — where server functions live from now on.
+   Start with just the import:
 
-4. **Create `src/server.rs`** — this is where server functions live from now
-   on:
+   ```rust
+   use dioxus::prelude::*;
+   ```
+
+   Add the function as an empty shell first, so its shape is clear before the
+   body:
 
    ```rust
    use dioxus::prelude::*;
 
    #[get("/api/ping")]
    pub async fn ping() -> ServerFnResult<String> {
-       Ok("pong from the server 🏓".to_string())
+       // fill in next
    }
    ```
 
-   A few things are happening in these four lines:
-
-   - `#[get("/api/ping")]` is a Dioxus macro that does two *different*
-     things depending on which build it's compiled into. On the server, it
-     turns `ping` into a real axum route — `GET /api/ping` — registered by
-     `dioxus::server::router` back in `main.rs`. In the WASM build, it
-     rewrites the function body into an HTTP client call: `fetch("/api/ping")`,
-     decode the JSON response, return it. Either way, callers just write
-     `ping().await` and get a `String` back — they can't tell which build
-     they're in, and don't need to.
-   - `ServerFnResult<String>` is a type alias for
-     `Result<String, ServerFnError>` — a normal `Result` whose error type
-     knows how to serialize itself across the network (an error on the
-     server becomes an error on the client, not a panic or a silent
-     failure).
-   - The function body only ever *runs* on the server. In the WASM build,
-     the macro has already replaced it with the fetch call — the string
-     `"pong from the server 🏓"` never ships to the browser as source, only
-     as the HTTP response body when someone calls it.
-
-5. **Call it from `App`.** In `app.rs`, hold the result in a signal and
-   call `ping()` from a button's `onclick`:
+   Then fill in the one-line body:
 
    ```rust
-   use crate::server::ping;
+   #[get("/api/ping")]
+   pub async fn ping() -> ServerFnResult<String> {
+       Ok("pong from the server 🏓".to_string()) // <-- add this
+   }
+   ```
 
+   What those lines do:
+
+   - `#[get("/api/ping")]` is a Dioxus macro that expands *differently* per
+     build. On the server it turns `ping` into a real axum route — `GET
+     /api/ping` — registered by `dioxus::server::router` back in `main.rs`. In
+     the WASM build it rewrites the body into an HTTP client call:
+     `fetch("/api/ping")`, decode the JSON response, return it. Either way,
+     callers just write `ping().await` and get a `String` back — they can't
+     tell which build they're in, and don't need to.
+   - `ServerFnResult<String>` is a type alias for
+     `Result<String, ServerFnError>` — a normal `Result` whose error type
+     serializes across the network, so an error on the server becomes an
+     `Err` on the client, not a panic or a silent failure.
+   - The body only ever *runs* on the server. In the WASM build the macro has
+     already replaced it with the fetch call — the string `"pong from the
+     server 🏓"` never ships to the browser as source, only as the HTTP
+     response body when someone calls it.
+
+5. **Call it from `App`.** Open `app.rs`. First import the server function,
+   just under the existing prelude import:
+
+   ```rust
+   use dioxus::prelude::*;
+   use crate::server::ping; // <-- add this
+   ```
+
+   Add a signal at the top of `App` to hold the reply — `None` until the
+   button is clicked:
+
+   ```rust
    pub fn App() -> Element {
-       let mut reply = use_signal(|| Option::<String>::None);
+       let mut reply = use_signal(|| Option::<String>::None); // <-- add this
 
        rsx! {
-           style { {CSS} }
-           main { class: "wrap",
-               h1 { "MyApp" }
-               button {
-                   onclick: move |_| async move {
-                       match ping().await {
-                           Ok(msg) => reply.set(Some(msg)),
-                           Err(e) => reply.set(Some(format!("error: {e}"))),
-                       }
-                   },
-                   "Ping the server"
-               }
-               if let Some(msg) = reply() {
-                   p { "{msg}" }
-               }
-           }
+           // ...unchanged for now
        }
    }
    ```
 
-   `onclick` takes a closure; `move |_| async move { ... }` is an async
-   closure — Dioxus spawns it as a task when clicked, and `.await`ing
-   `ping()` inside it doesn't block the UI. `reply.set(...)` updates the
-   signal, which re-renders the `if let Some(msg) = reply()` block
-   automatically — no manual DOM manipulation.
+   Now swap chapter 1's static "It's alive!" card for one with a button.
+   Add the button with an *empty* `onclick` first:
 
-Don't worry about getting every detail right — compare your result with
-[chapters/02-server-functions](../02-server-functions) once you've had a go.
+   ```rust
+           section { class: "card",
+               h2 { "Say hi to the server" }
+               p { "This button calls a `#[server]` function over HTTP and shows what comes back." }
+               div { class: "row",
+                   button {
+                       class: "primary",
+                       onclick: move |_| async move {
+                           // fill in next
+                       },
+                       "Ping the server"
+                   }
+               }
+           }
+   ```
+
+   `move |_| async move { ... }` is an async closure — Dioxus spawns it as a
+   task on click, so `.await`ing inside it doesn't block the UI. Fill it in to
+   call `ping` and store the result:
+
+   ```rust
+                       onclick: move |_| async move {
+                           match ping().await {                                  // <-- add this
+                               Ok(msg) => reply.set(Some(msg)),                  // <-- add this
+                               Err(e) => reply.set(Some(format!("error: {e}"))), // <-- add this
+                           }
+                       },
+   ```
+
+   Finally, show the reply. Add this right after the `div { class: "row", … }`
+   block, still inside the card:
+
+   ```rust
+               }
+               if let Some(msg) = reply() {     // <-- add this
+                   p { class: "mono", "{msg}" } // <-- add this
+               }
+   ```
+
+   `reply.set(...)` updates the signal; reading `reply()` inside `rsx!`
+   subscribes this block to it, so the `if let` re-renders on its own when the
+   reply arrives — no manual DOM work. (While you're here, bump the subtitle
+   to `p { class: "sub", "Chapter 2: server functions." }` to match.)
 
 ## Check your work
 

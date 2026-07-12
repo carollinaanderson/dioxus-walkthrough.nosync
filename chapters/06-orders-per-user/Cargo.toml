@@ -16,6 +16,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dioxus-clerk = "0.1"
 
+[build-dependencies]
+dotenvy = "0.15"
+
 [features]
 default = ["web"]
 web = ["dioxus/web"]

@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use dioxus_clerk::SignUp;
 
 #[component]
-pub fn RegisterPage() -> Element {
+pub fn Register() -> Element {
     rsx! {
         main { class: "wrap narrow",
             h1 { "Create account" }

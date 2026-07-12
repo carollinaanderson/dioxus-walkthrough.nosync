@@ -2,7 +2,8 @@
 //! Protected orders page — now genuinely showing only your own orders.
 //! `SignedOut` + `RedirectToSignIn` send anonymous visitors to sign in; the
 //! real UI only renders inside `SignedIn`. Server fns enforce auth themselves
-//! via `require_user_id`, which is also what scopes the query to you.
+//! via `dioxus_clerk::server::current_auth`, which is also what scopes the
+//! query to you.
 
 use dioxus::prelude::*;
 use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut, UserButton};
@@ -10,7 +11,7 @@ use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut, UserButton};
 use crate::server::{list_orders, start_order, OrderDto, OrderInput};
 
 #[component]
-pub fn OrdersPage() -> Element {
+pub fn Orders() -> Element {
     rsx! {
         SignedOut { RedirectToSignIn {} }
         SignedIn { OrdersView {} }
@@ -42,7 +43,12 @@ fn OrdersView() -> Element {
 
     let create = move |_| async move {
         let amt = amount().trim().parse::<u32>().unwrap_or(0);
-        match start_order(OrderInput { item: item(), amount: amt }).await {
+        match start_order(OrderInput {
+            item: item(),
+            amount: amt,
+        })
+        .await
+        {
             Ok(_) => {
                 error.set(None);
                 if let Ok(list) = list_orders().await {

@@ -47,7 +47,14 @@ no manual refresh.
   in-flight) so progress is visible at a glance.
 - **Auth is Clerk.** The page is gated by `SignedOut { RedirectToSignIn }` /
   `SignedIn { … }`; the server trusts the identity that `ClerkAuthLayer`
-  verified from the session cookie, read via `require_user_id()`.
+  verified from the session cookie, read via `current_auth()`.
+- **`build.rs`** loads `.env` at build time with
+  [`dotenvy`](https://crates.io/crates/dotenvy) so
+  `env!("CLERK_PUBLISHABLE_KEY")` resolves from your `.env` without a manual
+  `export` (see [chapter 4](../04-user-accounts/README.md) for the full
+  explanation). In the Docker build there's no `.env`, so the key comes from
+  the `--build-arg` instead — the missing file just falls through to the
+  process environment.
 - **The e2e test** (`src/jobs.rs`, `order_pipeline_runs_to_fulfilled`) boots
   a real `AppState` against your running Postgres, enqueues a job, and polls
   the database directly until the order reaches `'fulfilled'` — proving the

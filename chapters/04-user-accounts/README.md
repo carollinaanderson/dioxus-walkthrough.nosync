@@ -61,13 +61,40 @@ chapter 3 — everyone signed in sees the same list.
   caller's identity. It's harmless here (this chapter has no protected server
   fn yet) but wiring it now keeps the setup identical across the rest of the
   tutorial.
+- **`build.rs`** loads `.env` at *build* time. `env!("CLERK_PUBLISHABLE_KEY")`
+  is a compile-time macro — it reads the environment of the `cargo`/`dx`
+  process, not the `.env` file — so without this step you'd have to `export
+  CLERK_PUBLISHABLE_KEY=…` in your shell before every build. The build script
+  reads `.env` with [`dotenvy`](https://crates.io/crates/dotenvy) (a
+  `[build-dependencies]` entry — build scripts can't see your regular
+  `[dependencies]`) and re-emits each entry as `cargo:rustc-env` so `env!`
+  can see it:
+
+  ```rust
+  // build.rs
+  fn main() {
+      // Rerun whenever .env changes (including when it's first created).
+      println!("cargo:rerun-if-changed=.env");
+
+      if let Ok(iter) = dotenvy::from_path_iter(".env") {
+          for (key, value) in iter.flatten() {
+              println!("cargo:rustc-env={key}={value}");
+          }
+      }
+  }
+  ```
+
+  If `.env` is absent, `from_path_iter` returns `Err`, the block is skipped,
+  and the build falls back to the real process environment — which is how CI
+  and the Docker build (that passes the key as a `--build-arg`) supply it.
+  This is why `cp .env.example .env` followed by `dx serve` is all you need —
+  no manual `export`.
 
 ## Your turn: get to chapter 5
 
 Chapter 5 doesn't change *how* sessions work — Clerk already handles that.
-It's about *using* the session: a multi-page router, a protected orders page
-that redirects to a sign-in route when signed out, and a `require_user_id`
-guard reused by every protected server fn.
+It's about *using* the session: a multi-page router, and a protected orders page
+that redirects to a sign-in route when signed out.
 
 1. **Copy this chapter as your working copy:**
 
@@ -76,81 +103,141 @@ guard reused by every protected server fn.
    cd ../my-05-sessions
    ```
 
-2. **Add the Dioxus `router` feature** to `Cargo.toml`:
+2. **Add the Dioxus `router` feature** in `Cargo.toml` — extend the existing
+   `dioxus` line:
 
    ```toml
-   dioxus = { version = "0.7", features = ["fullstack", "router"] }
+   dioxus = { version = "0.7", features = ["fullstack", "router"] } # <-- add "router"
    ```
 
-3. **Split `App` into a router.** Give each surface its own file under
-   `src/pages/` — `pages/login.rs` and `pages/register.rs` each render one
-   Clerk widget, `pages/orders.rs` holds the protected orders UI — then in
-   `app.rs` keep `ClerkProvider` at the top and put a `Router` inside it:
+3. **Create the pages module with the sign-in / sign-up routes.** Each surface
+   gets its own file under `src/pages/`. Start with the module file,
+   `pages/mod.rs`:
+
+   ```rust
+   pub mod login;
+   pub mod orders;
+   pub mod register;
+   ```
+
+   `pages/login.rs` is a single Clerk widget on its own route — Clerk's
+   embedded `<SignIn />` renders the whole form and drops the session cookie on
+   success:
 
    ```rust
    use dioxus::prelude::*;
-   use crate::pages::login::LoginPage;
-   use crate::pages::orders::OrdersPage;
-   use crate::pages::register::RegisterPage;
+   use dioxus_clerk::SignIn;
 
-   #[derive(Routable, Clone, PartialEq)]
-   pub enum Route {
-       #[route("/")]
-       OrdersPage {},
-       #[route("/login")]
-       LoginPage {},
-       #[route("/register")]
-       RegisterPage {},
-   }
-
-   pub fn App() -> Element {
+   #[component]
+   pub fn Login() -> Element {
        rsx! {
-           style { {CSS} }
-           dioxus_clerk::ClerkProvider { publishable_key: env!("CLERK_PUBLISHABLE_KEY"),
-               Router::<Route> {}
+           main { class: "wrap narrow",
+               h1 { "Sign in" }
+               p { class: "sub", "MyApp order pipeline demo" }
+               SignIn {}
            }
        }
    }
    ```
 
-   `ClerkProvider` must stay above `Router` so every page can read auth
-   state. Each page component is a normal `#[component]` fn; `LoginPage` /
-   `RegisterPage` just render Clerk's embedded `SignIn {}` / `SignUp {}`
-   widgets.
+   `pages/register.rs` is the mirror image — the same file with `SignUp` in
+   place of `SignIn` and a "Create account" heading.
 
-4. **Protect the orders page with Clerk gating.** In `pages/orders.rs`, let
-   Clerk decide what renders:
+4. **Move the orders UI into `pages/orders.rs`, gated by Clerk.** First add the
+   gate component — anonymous visitors get bounced to Clerk's sign-in flow, the
+   real UI only mounts when signed in:
 
    ```rust
-   use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut};
+   use dioxus::prelude::*;
+   use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut, UserButton};
+   use crate::server::{list_orders, start_order, OrderDto, OrderInput};
 
    #[component]
-   pub fn OrdersPage() -> Element {
+   pub fn Orders() -> Element {
        rsx! {
-           SignedOut { RedirectToSignIn {} }
-           SignedIn { OrdersView {} }   // your real orders UI
+           SignedOut { RedirectToSignIn {} } // <-- bounce anonymous visitors to sign-in
+           SignedIn { OrdersView {} }        // <-- real UI only mounts when signed in
        }
    }
    ```
 
-   `RedirectToSignIn` navigates anonymous visitors to Clerk's sign-in flow;
-   the real UI only mounts inside `SignedIn`. This client-side gating is only
-   a UX nicety — the real enforcement is `require_user_id` on the server.
-
-5. **Gate the orders server fns.** Add a tiny server-only helper in
-   `auth.rs`:
+   Then add `OrdersView` below it — this is chapter 4's `OrdersSection`, moved
+   here almost verbatim, with the header + `UserButton` brought inside it:
 
    ```rust
-   #[cfg(feature = "server")]
-   pub fn require_user_id() -> Result<String, dioxus::prelude::ServerFnError> {
-       Ok(dioxus_clerk::server::current_auth()?.user_id)
+   #[component]
+   fn OrdersView() -> Element {
+       // the same signals, refresh/create handlers, use_future, and rsx! as
+       // chapter 4's OrdersSection — plus a `header { class: "nav" }` holding
+       // the title and a `UserButton {}` for sign-out
+   }
+   ```
+
+   The client-side gating is only a UX nicety — the real enforcement is
+   `current_auth` on the server (step 7).
+
+5. **Rewrite `app.rs` as a router.** Replace chapter 4's inline header + gated
+   orders with a `Route` enum and a `Router`. First the imports and routes:
+
+   ```rust
+   use dioxus::prelude::*;
+   use crate::pages::login::Login;
+   use crate::pages::orders::Orders;
+   use crate::pages::register::Register;
+
+   #[derive(Routable, Clone, PartialEq)]
+   pub enum Route {
+       #[route("/")]
+       Orders {},
+       #[route("/login")]
+       Login {},
+       #[route("/register")]
+       Register {},
+   }
+   ```
+
+   Then shrink `App` to the shell — `ClerkProvider` stays on top so every page
+   can read auth state, with the `Router` inside it:
+
+   ```rust
+   pub fn App() -> Element {
+       rsx! {
+           style { {CSS} }
+           dioxus_clerk::ClerkProvider { publishable_key: env!("CLERK_PUBLISHABLE_KEY"),
+               Router::<Route> {} // <-- replaces the old inline header + orders
+           }
+       }
+   }
+   ```
+
+6. **Register the new modules** in `main.rs`, next to the existing `mod`
+   declarations:
+
+   ```rust
+   mod app;
+   mod pages; // <-- add this
+   mod server;
+   ```
+
+7. **Gate the orders server fns.** Call `dioxus_clerk::server::current_auth` as
+   the first line of each protected server fn in `server.rs`:
+
+   ```rust
+   pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
+       dioxus_clerk::server::current_auth()?; // <-- add this
+       // ...rest unchanged
+   }
+
+   pub async fn list_orders() -> ServerFnResult<Vec<OrderDto>> {
+       dioxus_clerk::server::current_auth()?; // <-- add this
+       // ...rest unchanged
    }
    ```
 
    `current_auth()` reads the identity that `ClerkAuthLayer` (already wired in
-   `main.rs`) verified from the session cookie. Call `require_user_id()?` as
-   the first line of `start_order` and `list_orders` — for now just to gate
-   access, without using the returned id yet (that's chapter 6).
+   `main.rs` back in chapter 4) verified from the session cookie.
+   For now this only *gates* access — the returned id is discarded. Actually
+   using it to scope orders per user is chapter 6.
 
 ## Check your work
 

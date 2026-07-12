@@ -3,18 +3,18 @@
 
 use dioxus::prelude::*;
 
-use crate::pages::login::LoginPage;
-use crate::pages::orders::OrdersPage;
-use crate::pages::register::RegisterPage;
+use crate::pages::login::Login;
+use crate::pages::orders::Orders;
+use crate::pages::register::Register;
 
 #[derive(Routable, Clone, PartialEq)]
 pub enum Route {
     #[route("/")]
-    OrdersPage {},
+    Orders {},
     #[route("/login")]
-    LoginPage {},
+    Login {},
     #[route("/register")]
-    RegisterPage {},
+    Register {},
 }
 
 pub fn App() -> Element {

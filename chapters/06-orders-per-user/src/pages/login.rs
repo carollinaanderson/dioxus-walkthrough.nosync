@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 use dioxus_clerk::SignIn;
 
 #[component]
-pub fn LoginPage() -> Element {
+pub fn Login() -> Element {
     rsx! {
         main { class: "wrap narrow",
             h1 { "Sign in" }

@@ -1,9 +1,9 @@
 #![allow(non_snake_case)]
 //! Protected orders page. `SignedOut` + `RedirectToSignIn` send anonymous
 //! visitors to the sign-in route; the real orders UI only renders inside
-//! `SignedIn`. Server fns still enforce auth themselves via `require_user_id`.
-//! Every logged-in user still sees the same global order list — chapter 6
-//! scopes this per user.
+//! `SignedIn`. Server fns still enforce auth themselves via
+//! `dioxus_clerk::server::current_auth`. Every logged-in user still sees the
+//! same global order list — chapter 6 scopes this per user.
 
 use dioxus::prelude::*;
 use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut, UserButton};
@@ -11,7 +11,7 @@ use dioxus_clerk::{RedirectToSignIn, SignedIn, SignedOut, UserButton};
 use crate::server::{list_orders, start_order, OrderDto, OrderInput};
 
 #[component]
-pub fn OrdersPage() -> Element {
+pub fn Orders() -> Element {
     rsx! {
         SignedOut { RedirectToSignIn {} }
         SignedIn { OrdersView {} }
@@ -43,7 +43,12 @@ fn OrdersView() -> Element {
 
     let create = move |_| async move {
         let amt = amount().trim().parse::<u32>().unwrap_or(0);
-        match start_order(OrderInput { item: item(), amount: amt }).await {
+        match start_order(OrderInput {
+            item: item(),
+            amount: amt,
+        })
+        .await
+        {
             Ok(_) => {
                 error.set(None);
                 if let Ok(list) = list_orders().await {
