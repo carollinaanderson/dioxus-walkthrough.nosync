@@ -31,7 +31,7 @@ fn dto(row: crate::orders::OrderRow) -> OrderDto {
 
 #[post("/api/orders/start", state: axum::Extension<crate::state::AppState>)]
 pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
-    crate::auth::require_user_id(&state).await?;
+    crate::auth::require_user_id()?;
     let row = crate::orders::insert(&state.pool, &order.item, order.amount)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -40,7 +40,7 @@ pub async fn start_order(order: OrderInput) -> ServerFnResult<String> {
 
 #[get("/api/orders/list", state: axum::Extension<crate::state::AppState>)]
 pub async fn list_orders() -> ServerFnResult<Vec<OrderDto>> {
-    crate::auth::require_user_id(&state).await?;
+    crate::auth::require_user_id()?;
     let rows = crate::orders::list(&state.pool)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
