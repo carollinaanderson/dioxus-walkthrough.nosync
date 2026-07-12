@@ -1,42 +1,51 @@
 #![allow(non_snake_case)]
-//! One page with three sections: register, login, and the (still-unscoped)
-//! orders list from chapter 3. Nothing here remembers who you are yet — try
-//! registering, then reloading the page, and notice the result disappears.
+//! One page. Clerk owns accounts now: signed-out visitors get sign-in /
+//! sign-up buttons; signed-in visitors get a Clerk `UserButton` (avatar menu
+//! with sign-out) and the orders section from chapter 3. The orders list is
+//! still global — chapter 6 scopes it per user.
 
 use dioxus::prelude::*;
+use dioxus_clerk::{ClerkProvider, SignInButton, SignUpButton, SignedIn, SignedOut, UserButton};
 
-use crate::auth::{login, register};
 use crate::server::{list_orders, start_order, OrderDto, OrderInput};
 
 pub fn App() -> Element {
-    let mut reg_email = use_signal(String::new);
-    let mut reg_password = use_signal(String::new);
-    let mut reg_result = use_signal(|| Option::<String>::None);
+    rsx! {
+        style { {CSS} }
+        ClerkProvider { publishable_key: env!("CLERK_PUBLISHABLE_KEY"),
+            main { class: "wrap",
+                header { class: "nav",
+                    div {
+                        h1 { "MyApp" }
+                        p { class: "sub", "Chapter 4: user accounts via Clerk." }
+                    }
+                    div { class: "row",
+                        SignedOut {
+                            SignInButton { class: "primary", "Sign in" }
+                            SignUpButton { class: "ghost", "Create account" }
+                        }
+                        SignedIn { UserButton {} }
+                    }
+                }
 
-    let mut login_email = use_signal(String::new);
-    let mut login_password = use_signal(String::new);
-    let mut login_result = use_signal(|| Option::<String>::None);
+                SignedOut {
+                    section { class: "card",
+                        p { class: "muted", "Sign in or create an account to place orders." }
+                    }
+                }
 
+                SignedIn { OrdersSection {} }
+            }
+        }
+    }
+}
+
+#[component]
+fn OrdersSection() -> Element {
     let mut item = use_signal(|| "Widget".to_string());
     let mut amount = use_signal(|| "10".to_string());
     let mut orders = use_signal(Vec::<OrderDto>::new);
     let mut order_error = use_signal(|| Option::<String>::None);
-
-    let do_register = move |_| async move {
-        match register(reg_email(), reg_password()).await {
-            Ok(user) => reg_result.set(Some(format!("registered as {} ({})", user.email, user.id))),
-            Err(e) => reg_result.set(Some(format!("error: {e}"))),
-        }
-    };
-
-    let do_login = move |_| async move {
-        match login(login_email(), login_password()).await {
-            Ok(user) => {
-                login_result.set(Some(format!("logged in as {} ({})", user.email, user.id)))
-            }
-            Err(e) => login_result.set(Some(format!("error: {e}"))),
-        }
-    };
 
     let refresh_orders = move |_| async move {
         match list_orders().await {
@@ -50,12 +59,7 @@ pub fn App() -> Element {
 
     let create_order = move |_| async move {
         let amt = amount().trim().parse::<u32>().unwrap_or(0);
-        match start_order(OrderInput {
-            item: item(),
-            amount: amt,
-        })
-        .await
-        {
+        match start_order(OrderInput { item: item(), amount: amt }).await {
             Ok(_) => {
                 order_error.set(None);
                 if let Ok(list) = list_orders().await {
@@ -73,93 +77,43 @@ pub fn App() -> Element {
     });
 
     rsx! {
-        style { {CSS} }
-        main { class: "wrap",
-            h1 { "MyApp" }
-            p { class: "sub", "Chapter 4: user accounts via better-auth.rs." }
-
+        section { class: "card",
+            h2 { "New order" }
             div { class: "row",
-                section { class: "card narrow",
-                    h2 { "Register" }
-                    div { class: "col",
-                        input {
-                            value: "{reg_email}",
-                            oninput: move |e| reg_email.set(e.value()),
-                            placeholder: "Email",
-                        }
-                        input {
-                            r#type: "password",
-                            value: "{reg_password}",
-                            oninput: move |e| reg_password.set(e.value()),
-                            placeholder: "Password (min 8 chars)",
-                        }
-                        button { class: "primary", onclick: do_register, "Register" }
-                        if let Some(r) = reg_result() {
-                            p { class: "mono", "{r}" }
-                        }
-                    }
+                input {
+                    value: "{item}",
+                    oninput: move |e| item.set(e.value()),
+                    placeholder: "Item",
                 }
-
-                section { class: "card narrow",
-                    h2 { "Login" }
-                    div { class: "col",
-                        input {
-                            value: "{login_email}",
-                            oninput: move |e| login_email.set(e.value()),
-                            placeholder: "Email",
-                        }
-                        input {
-                            r#type: "password",
-                            value: "{login_password}",
-                            oninput: move |e| login_password.set(e.value()),
-                            placeholder: "Password",
-                        }
-                        button { class: "primary", onclick: do_login, "Login" }
-                        if let Some(r) = login_result() {
-                            p { class: "mono", "{r}" }
-                        }
-                    }
+                input {
+                    value: "{amount}",
+                    oninput: move |e| amount.set(e.value()),
+                    placeholder: "Amount",
                 }
+                button { class: "primary", onclick: create_order, "Create order" }
+                button { onclick: refresh_orders, "Refresh" }
             }
-
-            section { class: "card",
-                h2 { "New order" }
-                div { class: "row",
-                    input {
-                        value: "{item}",
-                        oninput: move |e| item.set(e.value()),
-                        placeholder: "Item",
-                    }
-                    input {
-                        value: "{amount}",
-                        oninput: move |e| amount.set(e.value()),
-                        placeholder: "Amount",
-                    }
-                    button { class: "primary", onclick: create_order, "Create order" }
-                    button { onclick: refresh_orders, "Refresh" }
-                }
-                if let Some(e) = order_error() {
-                    p { class: "err", "Error: {e}" }
-                }
+            if let Some(e) = order_error() {
+                p { class: "err", "Error: {e}" }
             }
+        }
 
-            section { class: "card",
-                h2 { "Orders" }
-                if orders().is_empty() {
-                    p { class: "muted", "No orders yet — create one above." }
-                } else {
-                    table {
-                        thead {
-                            tr { th { "Item" } th { "Amount" } th { "Id" } th { "Status" } }
-                        }
-                        tbody {
-                            for o in orders() {
-                                tr {
-                                    td { "{o.item}" }
-                                    td { "{o.amount}" }
-                                    td { class: "mono", "{o.id}" }
-                                    td { "{o.status}" }
-                                }
+        section { class: "card",
+            h2 { "Orders" }
+            if orders().is_empty() {
+                p { class: "muted", "No orders yet — create one above." }
+            } else {
+                table {
+                    thead {
+                        tr { th { "Item" } th { "Amount" } th { "Id" } th { "Status" } }
+                    }
+                    tbody {
+                        for o in orders() {
+                            tr {
+                                td { "{o.item}" }
+                                td { "{o.amount}" }
+                                td { class: "mono", "{o.id}" }
+                                td { "{o.status}" }
                             }
                         }
                     }
