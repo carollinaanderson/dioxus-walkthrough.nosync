@@ -19,6 +19,7 @@ You'll need:
 
 - **Rust** — [rustup.rs](https://rustup.rs)
 - **The Dioxus CLI** (`dx`) — `cargo install dioxus-cli`
+  or `cargo install cargo-binstall`
 - **Docker** — for Postgres, starting in chapter 3 ([docker.com](https://www.docker.com/get-started/))
 - **A Clerk account** — free at [clerk.com](https://clerk.com); starting in chapter 4 you'll need a publishable key and a secret key from your Clerk app
 
