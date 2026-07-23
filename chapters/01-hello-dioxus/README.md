@@ -10,17 +10,40 @@ running, and see how a *component* (`App`) and `rsx!` fit together.
 There's no server, no database, nothing async yet — just enough to prove the
 toolchain works end to end.
 
-## Run it
+## ✅ Run it 
 
 From this directory:
 
 ```bash
 dx serve
 ```
-
 Open the URL it prints (usually `http://localhost:8080`). You should see a
 "MyApp" heading and a little card. Edit the text in `src/app.rs` and save —
 `dx serve` hot-reloads the page automatically.
+
+
+#### 🧠 my notes: basics not so basics 
+
+* 00 rustup setup ```curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh ```
+* 1st enter in your folder, it's something like 
+```cd + dioxus...path main folder```
+* 2nd ```  dx serve --package ch01-hello-dioxus ``` 
+
+Attention! When I run dx serve this was the output: 
+``` 
+ERROR dx serve: Failed to find binary package to build.
+You need to either run dx from inside a binary crate or specify a binary package to build with the `--package` flag. Try building again with one of the binary packages in the workspace:
+- ch01-hello-dioxus
+- ch02-server-functions
+- ch03-orders-database
+- ch04-user-accounts
+- ch05-sessions
+- ch06-orders-per-user
+- ch07-background-jobs 
+``` 
+
+In order to fix it I run the 1st and 2nd points above and... Worked!💅🏼
+
 
 ## How it works
 
@@ -36,7 +59,7 @@ Open the URL it prints (usually `http://localhost:8080`). You should see a
 That's the whole app. Nothing here talks to a network or a database — it's a
 static page, same as if you'd written it in JavaScript with React.
 
-## Your turn: get to chapter 2
+## ✅ Your turn: get to chapter 2
 
 Chapter 2 adds a **server**: a real backend process, and a `#[server]`
 function the browser calls over HTTP. You'll build it up from this chapter's
@@ -44,7 +67,7 @@ code a piece at a time. Don't worry about getting every detail right — compare
 your result with [chapters/02-server-functions](../02-server-functions) once
 you've had a go.
 
-1. **Copy this chapter as your working copy** (don't edit chapters/01 in
+1.✅ **Copy this chapter as your working copy** (don't edit chapters/01 in
    place — keep it as a clean reference):
 
    ```bash
@@ -52,12 +75,12 @@ you've had a go.
    cd ../my-02-server-functions
    ```
 
-2. **Turn on Dioxus's `fullstack` feature and add server-only dependencies.**
+2.✅⚠️ **Turn on Dioxus's `fullstack` feature and add server-only dependencies.**
    Dioxus apps that have a server are compiled *twice*: once to WebAssembly
    for the browser, once to a native binary for the server. Cargo features
    let one `Cargo.toml` describe both builds.
 
-   Start in `Cargo.toml` by switching the `dioxus` line from the `web`
+  Start in `Cargo.toml` by switching the `dioxus` line from the `web`
    feature to `fullstack`:
 
    ```toml
@@ -91,7 +114,7 @@ you've had a go.
    sets for a fullstack app, so you never invoke this split by hand — it does
    it for you.
 
-3. **Branch `main.rs` on which build you're in.** Right now `main.rs` is just:
+3.⚠️🔴 **Branch `main.rs` on which build you're in.** Right now `main.rs` is just:
 
    ```rust
    mod app;
